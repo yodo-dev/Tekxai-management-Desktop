@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TekXAI Agent</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #005CDA;
+      --primary-dark: #0047b3;
+      --bg: #f5f7fa;
+      --card: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --green: #16a34a;
+      --red: #dc2626;
+      --orange: #ea580c;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      user-select: none;
+      -webkit-app-region: no-drag;
+    }
+
+    /* ── Titlebar ── */
+    .titlebar {
+      -webkit-app-region: drag;
+      height: 44px;
+      background: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+    }
+    .titlebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #fff;
+      font-weight: 800;
+      font-size: 15px;
+      letter-spacing: -0.3px;
+    }
+    .titlebar-logo span { font-size: 20px; }
+    .titlebar-actions { -webkit-app-region: no-drag; display: flex; gap: 6px; }
+    .titlebar-btn {
+      width: 28px; height: 28px;
+      border-radius: 8px;
+      border: none;
+      background: rgba(255,255,255,0.15);
+      color: #fff;
+      cursor: pointer;
+      font-size: 14px;
+      display: flex; align-items: center; justify-content: center;
+      transition: background .15s;
+    }
+    .titlebar-btn:hover { background: rgba(255,255,255,0.25); }
+
+    /* ── Screens ── */
+    .screen { display: none; flex-direction: column; height: calc(100vh - 44px); overflow-y: auto; }
+    .screen.active { display: flex; }
+
+    /* ── Login ── */
+    #login-screen {
+      align-items: center;
+      justify-content: center;
+      padding: 32px 24px;
+      gap: 24px;
+    }
+    .login-logo { font-size: 48px; }
+    .login-title { font-size: 22px; font-weight: 900; color: var(--text); text-align: center; }
+    .login-sub { font-size: 13px; color: var(--muted); text-align: center; }
+    .form-group { width: 100%; display: flex; flex-direction: column; gap: 6px; }
+    .form-group label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+    .form-group input {
+      width: 100%; height: 44px; padding: 0 14px;
+      border: 1.5px solid var(--border); border-radius: 12px;
+      font-size: 14px; outline: none; background: var(--card);
+      transition: border-color .15s;
+    }
+    .form-group input:focus { border-color: var(--primary); }
+    .btn {
+      width: 100%; height: 44px; border-radius: 12px; border: none;
+      font-size: 14px; font-weight: 700; cursor: pointer; transition: all .15s;
+    }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: var(--primary-dark); }
+    .btn-primary:disabled { opacity: .55; cursor: not-allowed; }
+    .btn-outline { background: transparent; border: 1.5px solid var(--border); color: var(--text); }
+    .btn-outline:hover { background: var(--bg); }
+    .error-msg { font-size: 12px; color: var(--red); text-align: center; min-height: 16px; }
+
+    /* ── Dashboard ── */
+    #dashboard-screen { padding: 20px; gap: 16px; }
+
+    .user-card {
+      background: var(--primary);
+      border-radius: 16px;
+      padding: 18px;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .avatar {
+      width: 48px; height: 48px; border-radius: 14px;
+      background: rgba(255,255,255,0.2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; font-weight: 900; color: #fff; flex-shrink: 0;
+    }
+    .user-name { font-size: 16px; font-weight: 800; }
+    .user-role { font-size: 12px; opacity: .75; margin-top: 2px; }
+
+    .tracker-card {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 20px;
+      border: 1.5px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .tracker-label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+    .tracker-time {
+      font-size: 40px; font-weight: 900; color: var(--text);
+      letter-spacing: -2px; line-height: 1;
+    }
+    .tracker-status {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 700;
+      padding: 4px 10px; border-radius: 8px;
+      width: fit-content;
+    }
+    .status-idle    { background: #f3f4f6; color: var(--muted); }
+    .status-active  { background: #dcfce7; color: var(--green); }
+    .status-paused  { background: #fff7ed; color: var(--orange); }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+    .tracker-actions { display: flex; gap: 8px; }
+    .tracker-actions .btn { flex: 1; height: 40px; font-size: 13px; border-radius: 10px; }
+    .btn-green  { background: #16a34a; color: #fff; border: none; }
+    .btn-green:hover  { background: #15803d; }
+    .btn-red    { background: #dc2626; color: #fff; border: none; }
+    .btn-red:hover    { background: #b91c1c; }
+    .btn-orange { background: #ea580c; color: #fff; border: none; }
+    .btn-orange:hover { background: #c2410c; }
+
+    .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .stat-card {
+      background: var(--card); border-radius: 14px;
+      padding: 14px; border: 1.5px solid var(--border);
+    }
+    .stat-label { font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+    .stat-value { font-size: 18px; font-weight: 900; color: var(--text); }
+
+    .action-row { display: flex; gap: 8px; }
+    .action-row .btn { flex: 1; height: 40px; font-size: 12px; border-radius: 10px; }
+
+    .screenshot-indicator {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; color: var(--muted); font-weight: 600;
+      background: var(--card); border-radius: 10px;
+      padding: 10px 14px; border: 1.5px solid var(--border);
+    }
+    .ss-dot { width: 8px; height: 8px; border-radius: 50%; background: #d1d5db; flex-shrink: 0; }
+    .ss-dot.active { background: var(--green); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    .logout-btn {
+      background: none; border: none; color: var(--muted);
+      font-size: 12px; font-weight: 600; cursor: pointer; text-align: center; padding: 4px;
+    }
+    .logout-btn:hover { color: var(--red); }
+
+    .ss-count { margin-left: auto; font-size: 10px; color: var(--muted); }
+  </style>
+</head>
+<body>
+
+<!-- Titlebar -->
+<div class="titlebar">
+  <div class="titlebar-logo">
+    <span>⚡</span> TekXAI Agent
+  </div>
+  <div class="titlebar-actions">
+    <button class="titlebar-btn" onclick="window.agent.openDashboard()" title="Open Dashboard">🌐</button>
+    <button class="titlebar-btn" onclick="window.close()" title="Minimize to tray">−</button>
+  </div>
+</div>
+
+<!-- Login Screen -->
+<div id="login-screen" class="screen active">
+  <div class="login-logo">⚡</div>
+  <div>
+    <div class="login-title">TekXAI Agent</div>
+    <div class="login-sub">Sign in to start tracking your time</div>
+  </div>
+  <div class="form-group">
+    <label>Email</label>
+    <input id="email" type="email" placeholder="you@tekxai.com" autocomplete="email" />
+  </div>
+  <div class="form-group">
+    <label>Password</label>
+    <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
+  </div>
+  <div class="error-msg" id="login-error"></div>
+  <button class="btn btn-primary" id="login-btn" onclick="doLogin()">Sign In</button>
+</div>
+
+<!-- Dashboard Screen -->
+<div id="dashboard-screen" class="screen">
+  <!-- User card -->
+  <div class="user-card">
+    <div class="avatar" id="user-avatar">?</div>
+    <div>
+      <div class="user-name" id="user-name">—</div>
+      <div class="user-role" id="user-role">—</div>
+    </div>
+  </div>
+
+  <!-- Time tracker -->
+  <div class="tracker-card">
+    <div class="tracker-label">Time Tracker</div>
+    <div class="tracker-time" id="tracker-time">0h:00m:00s</div>
+    <div class="tracker-status status-idle" id="tracker-status">
+      <div class="dot"></div>
+      <span id="status-text">Not clocked in</span>
+    </div>
+    <div class="tracker-actions" id="tracker-actions">
+      <button class="btn btn-green" id="btn-clock-in" onclick="doClock('in')">▶ Clock In</button>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Today</div>
+      <div class="stat-value" id="stat-today">0h 0m</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Check In</div>
+      <div class="stat-value" id="stat-checkin">—</div>
+    </div>
+  </div>
+
+  <!-- Screenshot indicator -->
+  <div class="screenshot-indicator">
+    <div class="ss-dot" id="ss-dot"></div>
+    <span id="ss-label">Screenshots paused</span>
+    <span class="ss-count" id="ss-count"></span>
+  </div>
+
+  <!-- Action row -->
+  <div class="action-row">
+    <button class="btn btn-outline" onclick="window.agent.openDashboard()">🌐 Dashboard</button>
+    <button class="btn btn-outline logout-btn" onclick="doLogout()">Sign Out</button>
+  </div>
+</div>
+
+<script src="renderer.js"></script>
+</body>
+</html>
