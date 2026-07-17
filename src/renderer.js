@@ -28,8 +28,6 @@ let screenshotCount = 0;
     screenshotCount++;
     const dot = document.getElementById('ss-dot');
     dot.classList.add('active');
-    document.getElementById('ss-count').textContent = `${screenshotCount} captured`;
-    setTimeout(() => dot.classList.add('active'), 0); // keep active while clocked in
   });
 })();
 
@@ -57,6 +55,18 @@ async function doLogin() {
     btn.disabled = false;
     btn.textContent = 'Sign In';
   }
+}
+
+function togglePasswordVisibility() {
+  const input = document.getElementById('password');
+  const toggle = document.getElementById('password-toggle');
+  const eyeIcon = document.getElementById('password-toggle-icon-eye');
+  const eyeOffIcon = document.getElementById('password-toggle-icon-eye-off');
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  eyeIcon.style.display = show ? 'none' : '';
+  eyeOffIcon.style.display = show ? '' : 'none';
+  toggle.title = show ? 'Hide password' : 'Show password';
 }
 
 document.addEventListener('keydown', (e) => {
@@ -178,7 +188,7 @@ function setTrackerUI(state) {
   } else if (state === 'done') {
     statusEl.classList.add('status-idle');
     textEl.textContent = 'Clocked out for today';
-    actRow.innerHTML = '<button class="btn btn-outline" disabled>Done for today</button>';
+    actRow.innerHTML = '<button class="btn btn-green" onclick="doClock(\'in\')">▶ Clock In Again</button>';
   }
 }
 
@@ -187,7 +197,7 @@ function setSsIndicator(active) {
   const label = document.getElementById('ss-label');
   if (active) {
     dot.classList.add('active');
-    label.textContent = 'Screenshots active (every 5 min)';
+    label.textContent = 'Monitoring active';
   } else {
     dot.classList.remove('active');
     label.textContent = 'Screenshots paused';
