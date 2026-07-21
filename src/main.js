@@ -29,6 +29,63 @@ function toIpcSafeError(err) {
   return new Error(backendMessage || err?.message || 'Request failed');
 }
 
+// Root cause of the 401-on-clock-in regression: JWT_EXPIRES_IN is 15 minutes
+// server-side, and this app issued a refresh token at login but never stored
+// or used it — every authenticated call started failing with "Invalid or
+// expired token" (401) once 15 minutes had passed since login, with no way
+// to recover short of logging out and back in. This is why login always
+// "succeeds" (a fresh token is valid at that instant) while clock-in fails
+// later in the same session — manual curl/Postman tests done immediately
+// after copying the token never hit this window.
+//
+// Fix: store the refresh token alongside the access token, and wrap every
+// authenticated call in authRequest() below, which retries once via
+// POST /auth/refresh on a 401 before giving up. No business rule, lifecycle
+// check, or authorization logic is touched — this only keeps the session's
+// own access token current.
+async function performTokenRefresh() {
+  const refresh_token = store.get('refresh_token');
+  if (!refresh_token) throw new Error('No refresh token available');
+
+  const axios = require('axios');
+  const res = await axios.post(`${API_BASE}/auth/refresh`, { refresh_token });
+  const payload = res.data?.payload || res.data?.data;
+  const newAccessToken = payload?.accessToken || payload?.access_token;
+  // /auth/refresh rotates the refresh token (the old one is revoked server-side
+  // the moment a new one is issued) — the new one must be persisted or the
+  // *next* refresh attempt will fail against an already-revoked token.
+  const newRefreshToken = payload?.refreshToken || payload?.refresh_token;
+  if (!newAccessToken) throw new Error('Refresh response missing access token');
+
+  store.set('auth_token', newAccessToken);
+  if (newRefreshToken) store.set('refresh_token', newRefreshToken);
+  return newAccessToken;
+}
+
+// Wraps an authenticated request: on a 401, refreshes the access token once
+// and retries the exact same request with it. If the refresh token itself is
+// also invalid/expired/revoked, clears the session so the user is prompted
+// to log in again rather than looping on a session that can't be recovered.
+async function authRequest(requestFn) {
+  const token = store.get('auth_token');
+  try {
+    return await requestFn(token);
+  } catch (err) {
+    if (err?.response?.status !== 401) throw err;
+    let refreshedToken;
+    try {
+      refreshedToken = await performTokenRefresh();
+    } catch (_) {
+      store.delete('auth_token');
+      store.delete('refresh_token');
+      store.delete('user');
+      updateTrayMenu();
+      throw err; // surface the original 401, not the refresh failure
+    }
+    return await requestFn(refreshedToken);
+  }
+}
+
 // ── App ready ─────────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
@@ -135,8 +192,10 @@ ipcMain.handle('login', async (_, { email, password }) => {
   }
   const payload = res.data.payload || res.data.data;
   const token = payload.accessToken || payload.access_token || payload.token;
+  const refreshToken = payload.refreshToken || payload.refresh_token;
   const user = payload.user;
   store.set('auth_token', token);
+  if (refreshToken) store.set('refresh_token', refreshToken);
   store.set('user', user || payload);
   updateTrayMenu();
   return { user: user || payload };
@@ -145,6 +204,7 @@ ipcMain.handle('login', async (_, { email, password }) => {
 ipcMain.handle('logout', async () => {
   stopScreenshots();
   store.delete('auth_token');
+  store.delete('refresh_token');
   store.delete('user');
   store.set('clocked_in', false);
   sessionId = null;
@@ -152,13 +212,12 @@ ipcMain.handle('logout', async () => {
 });
 
 ipcMain.handle('get-today', async () => {
-  const token = store.get('auth_token');
-  if (!token) return null;
+  if (!store.get('auth_token')) return null;
   const axios = require('axios');
   try {
-    const res = await axios.get(`${API_BASE}/timesheet/today`, {
+    const res = await authRequest((token) => axios.get(`${API_BASE}/timesheet/today`, {
       headers: { Authorization: `Bearer ${token}` },
-    });
+    }));
     return res.data.payload;
   } catch (err) {
     throw toIpcSafeError(err);
@@ -166,31 +225,32 @@ ipcMain.handle('get-today', async () => {
 });
 
 ipcMain.handle('clock-in', async () => {
-  const token = store.get('auth_token');
   const axios = require('axios');
 
   // Start monitoring session
   try {
-    const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
-      agent_version: app.getVersion(),
-      os_platform: process.platform,
-    }, { headers: { Authorization: `Bearer ${token}` } });
-    sessionId = sessRes.data.payload.id;
+    await authRequest(async (token) => {
+      const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
+        agent_version: app.getVersion(),
+        os_platform: process.platform,
+      }, { headers: { Authorization: `Bearer ${token}` } });
+      sessionId = sessRes.data.payload.id;
+    });
   } catch (_) {}
 
   let entry;
   try {
-    const res = await axios.post(`${API_BASE}/timesheet/clock-in`, {}, {
+    const res = await authRequest((token) => axios.post(`${API_BASE}/timesheet/clock-in`, {}, {
       headers: { Authorization: `Bearer ${token}` },
-    });
+    }));
     entry = res.data.payload;
   } catch (err) {
     if (err.response?.status === 409) {
       // Already clocked in — fetch today's entry and resume
       try {
-        const todayRes = await axios.get(`${API_BASE}/timesheet/today`, {
+        const todayRes = await authRequest((token) => axios.get(`${API_BASE}/timesheet/today`, {
           headers: { Authorization: `Bearer ${token}` },
-        });
+        }));
         entry = todayRes.data.payload?.entry;
       } catch (todayErr) {
         throw toIpcSafeError(todayErr);
@@ -202,22 +262,25 @@ ipcMain.handle('clock-in', async () => {
 
   store.set('clocked_in', true);
   updateTrayMenu();
-  startScreenshots(token);
-  startAppUsage(token);
+  // Re-read from store rather than reusing a captured variable — authRequest()
+  // above may have refreshed the access token mid-call, and the timers below
+  // need the current one, not whatever was valid when clock-in started.
+  const currentToken = store.get('auth_token');
+  startScreenshots(currentToken);
+  startAppUsage(currentToken);
   return entry;
 });
 
 ipcMain.handle('clock-out', async () => {
-  const token = store.get('auth_token');
   const axios = require('axios');
 
   stopScreenshots();
 
   let res;
   try {
-    res = await axios.post(`${API_BASE}/timesheet/clock-out`, {}, {
+    res = await authRequest((token) => axios.post(`${API_BASE}/timesheet/clock-out`, {}, {
       headers: { Authorization: `Bearer ${token}` },
-    });
+    }));
   } catch (err) {
     throw toIpcSafeError(err);
   }
@@ -225,9 +288,9 @@ ipcMain.handle('clock-out', async () => {
   // End monitoring session
   if (sessionId) {
     try {
-      await axios.post(`${API_BASE}/monitoring/session/${sessionId}/end`, {}, {
+      await authRequest((token) => axios.post(`${API_BASE}/monitoring/session/${sessionId}/end`, {}, {
         headers: { Authorization: `Bearer ${token}` },
-      });
+      }));
     } catch (_) {}
     sessionId = null;
   }
