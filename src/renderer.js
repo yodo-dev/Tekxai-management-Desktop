@@ -3,6 +3,11 @@
 let clockedIn = false;
 let clockedOut = false;
 let startEpoch = 0;
+// Seconds already worked today from sessions completed BEFORE the current
+// running one (or the whole day's total once clocked out). Attendance is
+// per-day, not per check-in — the ticker below adds this to the running
+// session's elapsed time instead of starting from zero on every clock-in.
+let priorSeconds = 0;
 let tickInterval = null;
 let screenshotCount = 0;
 
@@ -28,6 +33,15 @@ let screenshotCount = 0;
     screenshotCount++;
     const dot = document.getElementById('ss-dot');
     dot.classList.add('active');
+  });
+
+  // Main process cleared the session (refresh token missing/expired/revoked)
+  // — fall back to the login screen instead of leaving a stale "logged in"
+  // dashboard up against a session that no longer exists.
+  window.agent.onSessionExpired(() => {
+    clockedIn = false; clockedOut = false; priorSeconds = 0;
+    if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
+    showLogin('Your session expired. Please sign in again.');
   });
 })();
 
@@ -81,11 +95,20 @@ document.addEventListener('keydown', (e) => {
 async function doLogout() {
   stopTick();
   await window.agent.logout();
-  clockedIn = false; clockedOut = false; startEpoch = 0; screenshotCount = 0;
+  clockedIn = false; clockedOut = false; startEpoch = 0; priorSeconds = 0; screenshotCount = 0;
+  showLogin();
+}
+
+// Switches back to the login screen — used for an explicit logout and for a
+// forced session-expiry (see onSessionExpired above), with an optional
+// message shown in the login form's error area to explain why.
+function showLogin(message) {
   document.getElementById('login-screen').classList.add('active');
   document.getElementById('dashboard-screen').classList.remove('active');
   document.getElementById('email').value = '';
   document.getElementById('password').value = '';
+  const errEl = document.getElementById('login-error');
+  if (errEl) errEl.textContent = message || '';
 }
 
 // ── Show dashboard ────────────────────────────────────────────────────────────
@@ -108,9 +131,12 @@ async function refreshToday() {
     if (!data) return;
 
     if (data.clocked_in && !data.clocked_out) {
-      // Active session — restore elapsed time
+      // Active session — restore elapsed time, plus whatever was already
+      // worked in earlier sessions today (data.entry.prior_seconds), so the
+      // timer resumes the daily total instead of restarting at zero.
       const checkIn = new Date(data.entry.check_in).getTime();
       startEpoch = checkIn;
+      priorSeconds = data.entry.prior_seconds || 0;
       clockedIn = true; clockedOut = false;
       setTrackerUI('active');
       startTick();
@@ -118,9 +144,11 @@ async function refreshToday() {
 
       const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       document.getElementById('stat-checkin').textContent = checkinTime;
-      document.getElementById('stat-today').textContent = fmtDuration(data.entry.duration_seconds || 0);
+      const elapsedNow = Math.max(0, Math.floor((Date.now() - startEpoch) / 1000));
+      document.getElementById('stat-today').textContent = fmtDuration(priorSeconds + elapsedNow);
     } else if (data.clocked_in && data.clocked_out) {
       clockedIn = false; clockedOut = true;
+      priorSeconds = 0;
       setTrackerUI('done');
       const dur = data.entry.duration_seconds || 0;
       document.getElementById('tracker-time').textContent = fmtHms(dur);
@@ -142,6 +170,9 @@ async function doClock(action) {
       actRow.innerHTML = '<button class="btn btn-outline" disabled>Clocking in…</button>';
       const entry = await window.agent.clockIn();
       startEpoch = new Date(entry.check_in || Date.now()).getTime();
+      // Resume today's accumulated total (earlier completed sessions today)
+      // instead of restarting the timer from zero on a second check-in.
+      priorSeconds = entry.prior_seconds || 0;
       clockedIn = true; clockedOut = false;
       screenshotCount = 0;
       setTrackerUI('active');
@@ -154,9 +185,14 @@ async function doClock(action) {
       const entry = await window.agent.clockOut();
       clockedIn = false; clockedOut = true;
       stopTick();
-      const dur = entry.duration_sec || entry.duration_seconds || 0;
-      document.getElementById('tracker-time').textContent = fmtHms(dur);
-      document.getElementById('stat-today').textContent = fmtDuration(dur);
+      // entry.duration_sec is only THIS session's length (each check-in/out
+      // is its own row) — add the sessions already completed earlier today
+      // so the display shows the full daily total, not just the last session.
+      const sessionDur = entry.duration_sec || entry.duration_seconds || 0;
+      const dailyTotal = priorSeconds + sessionDur;
+      document.getElementById('tracker-time').textContent = fmtHms(dailyTotal);
+      document.getElementById('stat-today').textContent = fmtDuration(dailyTotal);
+      priorSeconds = dailyTotal;
       setTrackerUI('done');
       setSsIndicator(false);
     }
@@ -210,7 +246,7 @@ function setSsIndicator(active) {
 function startTick() {
   stopTick();
   tickInterval = setInterval(() => {
-    const elapsed = Math.floor((Date.now() - startEpoch) / 1000);
+    const elapsed = priorSeconds + Math.floor((Date.now() - startEpoch) / 1000);
     document.getElementById('tracker-time').textContent = fmtHms(elapsed);
     document.getElementById('stat-today').textContent   = fmtDuration(elapsed);
   }, 1000);

@@ -29,20 +29,10 @@ function toIpcSafeError(err) {
   return new Error(backendMessage || err?.message || 'Request failed');
 }
 
-// Root cause of the 401-on-clock-in regression: JWT_EXPIRES_IN is 15 minutes
-// server-side, and this app issued a refresh token at login but never stored
-// or used it — every authenticated call started failing with "Invalid or
-// expired token" (401) once 15 minutes had passed since login, with no way
-// to recover short of logging out and back in. This is why login always
-// "succeeds" (a fresh token is valid at that instant) while clock-in fails
-// later in the same session — manual curl/Postman tests done immediately
-// after copying the token never hit this window.
-//
-// Fix: store the refresh token alongside the access token, and wrap every
-// authenticated call in authRequest() below, which retries once via
-// POST /auth/refresh on a 401 before giving up. No business rule, lifecycle
-// check, or authorization logic is touched — this only keeps the session's
-// own access token current.
+// JWT_EXPIRES_IN is 15 minutes server-side, so every authenticated call needs
+// a way to recover once the access token expires mid-session. Every call is
+// wrapped in authRequest() below, which retries once via POST /auth/refresh
+// on a 401 before giving up.
 async function performTokenRefresh() {
   const refresh_token = store.get('refresh_token');
   if (!refresh_token) throw new Error('No refresh token available');
@@ -64,8 +54,9 @@ async function performTokenRefresh() {
 
 // Wraps an authenticated request: on a 401, refreshes the access token once
 // and retries the exact same request with it. If the refresh token itself is
-// also invalid/expired/revoked, clears the session so the user is prompted
-// to log in again rather than looping on a session that can't be recovered.
+// also invalid/expired/revoked, clears the session and tells the renderer to
+// fall back to the login screen, rather than leaving a "logged in" UI up
+// against a session that no longer exists.
 async function authRequest(requestFn) {
   const token = store.get('auth_token');
   try {
@@ -80,6 +71,7 @@ async function authRequest(requestFn) {
       store.delete('refresh_token');
       store.delete('user');
       updateTrayMenu();
+      mainWindow?.webContents.send('session-expired');
       throw err; // surface the original 401, not the refresh failure
     }
     return await requestFn(refreshedToken);
@@ -191,9 +183,18 @@ ipcMain.handle('login', async (_, { email, password }) => {
     throw new Error(res.data?.message || 'Login failed');
   }
   const payload = res.data.payload || res.data.data;
+  // A 2FA-enabled account gets a challenge response ({requires_2fa, user_id})
+  // instead of tokens — this app has no OTP-entry UI to complete that
+  // challenge, so surface a clear error now rather than silently storing an
+  // undefined token and letting the renderer show a "logged in" dashboard
+  // against a session that was never actually established.
+  if (payload.requires_2fa) {
+    throw new Error('This account has two-factor authentication enabled, which the desktop app does not yet support. Please sign in from the web dashboard instead.');
+  }
   const token = payload.accessToken || payload.access_token || payload.token;
   const refreshToken = payload.refreshToken || payload.refresh_token;
   const user = payload.user;
+  if (!token) throw new Error('Login response did not include an access token.');
   store.set('auth_token', token);
   if (refreshToken) store.set('refresh_token', refreshToken);
   store.set('user', user || payload);
@@ -259,6 +260,21 @@ ipcMain.handle('clock-in', async () => {
       throw toIpcSafeError(err);
     }
   }
+
+  // The raw POST /timesheet/clock-in response is just the brand-new entry
+  // row — it has no idea whether the user already worked earlier sessions
+  // today. Fetch /timesheet/today right after (same call the 409 branch
+  // above already makes) so the renderer always gets prior_seconds and can
+  // resume the daily total instead of restarting the timer from zero. This
+  // is a display-only merge — the backend's timesheet_entries rows (the
+  // real source of truth) are untouched.
+  try {
+    const todayRes = await authRequest((token) => axios.get(`${API_BASE}/timesheet/today`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    const prior_seconds = todayRes.data.payload?.entry?.prior_seconds;
+    if (typeof prior_seconds === 'number') entry = { ...entry, prior_seconds };
+  } catch (_) {}
 
   store.set('clocked_in', true);
   updateTrayMenu();
