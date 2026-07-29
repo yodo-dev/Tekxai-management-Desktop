@@ -1,11 +1,20 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
+const { autoUpdater } = require('electron-updater');
 
 const store = new Store();
 const API_BASE = 'https://api.tekxai.services/api/v1';
 const DASHBOARD_URL = 'https://tekxai.services/employee';
 const SCREENSHOT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Update feed: see package.json "build.publish" (generic provider). Every
+// installed app checks this URL on startup and every 4 hours; a matching
+// installer + latest.yml/latest-mac.yml must be uploaded there on release
+// (electron-builder's --publish flag does this automatically given AWS/
+// generic-server credentials on the build machine — see release docs).
+let updateStatus = 'idle'; // idle | checking | available | downloading | ready | none | error
+
 
 let mainWindow = null;
 let tray = null;
@@ -78,11 +87,64 @@ async function authRequest(requestFn) {
   }
 }
 
+// ── Auto-update ───────────────────────────────────────────────────────────────
+
+// autoDownload: fetch the update in the background as soon as one is found,
+// so it's ready the moment the user is willing to restart — matches how
+// most desktop apps (Slack, VS Code, etc.) behave, no extra click required
+// to start the download.
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
+
+function initAutoUpdater() {
+  // electron-updater no-ops (and logs a warning) against an unpackaged dev
+  // run — `npm start` never has a real installer to compare against, so
+  // skip wiring it up entirely rather than let it throw/spam the console.
+  if (!app.isPackaged) return;
+
+  autoUpdater.on('checking-for-update', () => { updateStatus = 'checking'; updateTrayMenu(); });
+  autoUpdater.on('update-available', () => { updateStatus = 'available'; updateTrayMenu(); });
+  autoUpdater.on('update-not-available', () => { updateStatus = 'none'; updateTrayMenu(); });
+  autoUpdater.on('error', (err) => {
+    updateStatus = 'error';
+    updateTrayMenu();
+    console.error('[auto-update] error', err);
+  });
+  autoUpdater.on('download-progress', () => { updateStatus = 'downloading'; updateTrayMenu(); });
+  autoUpdater.on('update-downloaded', (info) => {
+    updateStatus = 'ready';
+    updateTrayMenu();
+    // A silent background download is fine, but installing must never
+    // happen without the user's say-so — they may be mid clock-in/out or
+    // mid-screenshot-capture. Ask, and only quitAndInstall() on "Restart Now".
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      buttons: ['Restart Now', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'Update Ready',
+      message: `TekXAI Agent ${info.version} has been downloaded.`,
+      detail: 'Restart now to apply the update, or it will install automatically the next time you quit the app.',
+    }).then(({ response }) => {
+      if (response === 0) autoUpdater.quitAndInstall();
+    });
+  });
+
+  autoUpdater.checkForUpdates().catch((err) => console.error('[auto-update] initial check failed', err));
+  // Re-check periodically for a long-lived tray session — most users never
+  // quit this app, so startup-only checks would leave long-running installs
+  // stuck on old versions indefinitely.
+  setInterval(() => {
+    autoUpdater.checkForUpdates().catch((err) => console.error('[auto-update] periodic check failed', err));
+  }, 4 * 60 * 60 * 1000); // 4 hours
+}
+
 // ── App ready ─────────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
   createWindow();
   createTray();
+  initAutoUpdater();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
@@ -144,10 +206,19 @@ function createTray() {
   });
 }
 
+const UPDATE_STATUS_LABELS = {
+  checking: 'Checking for updates…',
+  available: 'Update found — downloading…',
+  downloading: 'Downloading update…',
+  ready: '🔄 Restart to update',
+  error: 'Update check failed',
+};
+
 function updateTrayMenu() {
   const token = store.get('auth_token');
   const user = store.get('user');
   const clocked = store.get('clocked_in', false);
+  const updateLabel = UPDATE_STATUS_LABELS[updateStatus];
 
   const menu = Menu.buildFromTemplate([
     { label: user ? `${user.first_name} ${user.last_name}` : 'Not logged in', enabled: false },
@@ -160,6 +231,18 @@ function updateTrayMenu() {
       { label: clocked ? 'Clock Out' : 'Clock In', click: () => mainWindow?.webContents.send('tray-toggle-clock') },
       { type: 'separator' },
     ] : []),
+    ...(updateLabel
+      ? [{
+          label: updateLabel,
+          enabled: updateStatus === 'ready',
+          click: updateStatus === 'ready' ? () => autoUpdater.quitAndInstall() : undefined,
+        }]
+      : [{
+          label: 'Check for Updates',
+          enabled: app.isPackaged,
+          click: () => autoUpdater.checkForUpdates().catch((err) => console.error('[auto-update] manual check failed', err)),
+        }]),
+    { type: 'separator' },
     { label: 'Quit', click: () => app.quit() },
   ]);
   tray.setContextMenu(menu);
