@@ -178,6 +178,7 @@ async function refreshToday() {
 
       const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       document.getElementById('stat-checkin').textContent = checkinTime;
+      // Math.max(0, ...) guards against a skewed/behind local clock (see startTick).
       const elapsedNow = Math.max(0, Math.floor((Date.now() - startEpoch) / 1000));
       document.getElementById('stat-today').textContent = fmtDuration(priorSeconds + elapsedNow);
     } else if (data.clocked_in && data.clocked_out) {
@@ -280,7 +281,11 @@ function setSsIndicator(active) {
 function startTick() {
   stopTick();
   tickInterval = setInterval(() => {
-    const elapsed = priorSeconds + Math.floor((Date.now() - startEpoch) / 1000);
+    // Math.max(0, ...) guards against a negative reading if this machine's
+    // system clock is behind the server's (check_in is a server timestamp;
+    // a skewed/misconfigured local clock would otherwise make `now` appear
+    // to be BEFORE check_in and show a nonsensical negative timer).
+    const elapsed = priorSeconds + Math.max(0, Math.floor((Date.now() - startEpoch) / 1000));
     document.getElementById('tracker-time').textContent = fmtHms(elapsed);
     document.getElementById('stat-today').textContent   = fmtDuration(elapsed);
   }, 1000);
