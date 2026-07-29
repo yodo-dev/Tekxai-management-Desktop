@@ -12,4 +12,5 @@ contextBridge.exposeInMainWorld('agent', {
   openDashboard: ()               => ipcRenderer.invoke('open-dashboard'),
   onScreenshot:  (cb)             => ipcRenderer.on('screenshot-taken', cb),
   onToggleClock: (cb)             => ipcRenderer.on('tray-toggle-clock', cb),
+  onSessionExpired: (cb)          => ipcRenderer.on('session-expired', cb),
 });
