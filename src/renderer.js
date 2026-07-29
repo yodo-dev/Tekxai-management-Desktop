@@ -125,10 +125,44 @@ function showDashboard(user) {
 
 // ── Restore today's session ───────────────────────────────────────────────────
 
+// Desktop-app contract with GET /timesheet/today (be-work
+// timesheets.controller.js `today_entry`, math in
+// timesheets.service.js `summarize_today_entries`):
+//
+//   clocked_in: boolean
+//   clocked_out: boolean
+//   entry: null                                              // never clocked in today
+//        | { check_in, check_out: null, prior_seconds, status }   // open session
+//        | { check_in, check_out, duration_seconds,
+//            duration_label, status }                         // day fully closed out
+//
+// The backend is the single source of truth for this shape — this app must
+// NEVER recompute "today's total" from raw session rows itself. If a field
+// this app depends on (prior_seconds / duration_seconds / check_in) is ever
+// renamed or removed on the backend, that must fail loudly here rather than
+// silently rendering "0h 0m" — matching the exact bug this file was fixed
+// for (a prior_seconds/duration_seconds field-name mismatch went unnoticed
+// for a full release because refreshToday()'s catch swallowed it silently).
+function assertTodayContract(data) {
+  if (!data.entry) return; // null entry is a valid, documented shape
+  const missingCheckIn = data.clocked_in && !data.clocked_out && typeof data.entry.check_in !== 'string';
+  const missingPrior = data.clocked_in && !data.clocked_out && typeof data.entry.prior_seconds !== 'number';
+  const missingDuration = data.clocked_in && data.clocked_out && typeof data.entry.duration_seconds !== 'number';
+  if (missingCheckIn || missingPrior || missingDuration) {
+    console.error(
+      '[attendance contract violation] GET /timesheet/today returned an entry shape this app does not recognize — ' +
+      'refusing to guess and silently show 0h 0m. Expected {check_in, prior_seconds} for an open session or ' +
+      '{duration_seconds} for a closed day. Got:', JSON.stringify(data)
+    );
+    throw new Error('Unexpected /timesheet/today response shape — see console.');
+  }
+}
+
 async function refreshToday() {
   try {
     const data = await window.agent.getToday();
     if (!data) return;
+    assertTodayContract(data);
 
     if (data.clocked_in && !data.clocked_out) {
       // Active session — restore elapsed time, plus whatever was already
