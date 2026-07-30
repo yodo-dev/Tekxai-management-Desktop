@@ -1,6 +1,6 @@
 {
   "name": "tekxai-agent",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TekXAI Desktop Agent — time tracking & screenshot monitoring",
   "main": "src/main.js",
   "scripts": {
