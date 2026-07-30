@@ -45,7 +45,9 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "closeApplication": true,
+      "restartApplication": true
     }
   },
   "dependencies": {

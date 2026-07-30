@@ -3,6 +3,21 @@ const path = require('path');
 const Store = require('electron-store');
 const { autoUpdater } = require('electron-updater');
 
+// Without this lock, launching the app while it's already running (e.g. from
+// the Start Menu shortcut, or the installer's "run after finish" option)
+// spawns a whole second Electron process instead of focusing the existing
+// one — each with its own screenshot/tracking timers, and on Windows each
+// holding its own lock on the installed files. That second condition is
+// exactly what surfaces as the installer's "TekXAI Agent cannot be closed"
+// prompt during an upgrade: some process still has the exe/DLLs open.
+// Second launches now just focus the original window instead.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => showMainWindow());
+}
+
 const store = new Store();
 const API_BASE = 'https://api.tekxai.services/api/v1';
 const DASHBOARD_URL = 'https://tekxai.services/employee';
@@ -140,7 +155,7 @@ function initAutoUpdater() {
 app.whenReady().then(() => {
   createWindow();
   initAutoUpdater();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showMainWindow(); });
 });
 
 // No more tray icon to keep the process alive invisibly — closing the
@@ -184,6 +199,20 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
+}
+
+// mainWindow can be destroyed (not just hidden/minimized) in edge cases a
+// plain `mainWindow?.show()` doesn't catch — e.g. Windows session-ending
+// events — and calling any method on a destroyed BrowserWindow throws
+// "Object has been destroyed". Recreate rather than crash.
+function showMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  } else {
+    createWindow();
+  }
 }
 
 // ── IPC handlers ──────────────────────────────────────────────────────────────
