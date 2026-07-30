@@ -1,3 +1,12 @@
+// DEPRECATED / UNUSED — package.json's "build.afterSign" hook pointing here
+// has been removed. electron-builder 24.x has its own built-in notarization
+// step (app-builder-lib/macPackager.js#notarizeIfProvided) that runs
+// automatically during `electron-builder --mac` whenever
+// APPLE_API_KEY / APPLE_API_KEY_ID / APPLE_API_ISSUER are set (note the var
+// name is APPLE_API_KEY, the actual .p8 path — not APPLE_API_KEY_PATH as
+// this file used). Keeping both was causing duplicate notarization attempts
+// for no benefit. This file is kept only for reference; it is not invoked
+// by any build script. Safe to delete.
 const { notarize } = require('@electron/notarize');
 
 module.exports = async function notarizing(context) {
