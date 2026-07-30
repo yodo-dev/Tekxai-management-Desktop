@@ -22,12 +22,6 @@ let screenshotCount = 0;
     await refreshToday();
   }
 
-  // Tray triggered clock toggle
-  window.agent.onToggleClock(() => {
-    if (clockedIn) doClock('out');
-    else doClock('in');
-  });
-
   // Screenshot pulse
   window.agent.onScreenshot(() => {
     screenshotCount++;

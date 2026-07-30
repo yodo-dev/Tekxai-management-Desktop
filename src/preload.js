@@ -10,7 +10,8 @@ contextBridge.exposeInMainWorld('agent', {
   clockIn:       ()               => ipcRenderer.invoke('clock-in'),
   clockOut:      ()               => ipcRenderer.invoke('clock-out'),
   openDashboard: ()               => ipcRenderer.invoke('open-dashboard'),
+  minimizeWindow: ()              => ipcRenderer.invoke('minimize-window'),
+  closeWindow:   ()               => ipcRenderer.invoke('close-window'),
   onScreenshot:  (cb)             => ipcRenderer.on('screenshot-taken', cb),
-  onToggleClock: (cb)             => ipcRenderer.on('tray-toggle-clock', cb),
   onSessionExpired: (cb)          => ipcRenderer.on('session-expired', cb),
 });

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
 const { autoUpdater } = require('electron-updater');
@@ -17,7 +17,6 @@ let updateStatus = 'idle'; // idle | checking | available | downloading | ready 
 
 
 let mainWindow = null;
-let tray = null;
 let screenshotTimer = null;
 let appUsageTimer = null;
 let sessionId = null;
@@ -79,7 +78,6 @@ async function authRequest(requestFn) {
       store.delete('auth_token');
       store.delete('refresh_token');
       store.delete('user');
-      updateTrayMenu();
       mainWindow?.webContents.send('session-expired');
       throw err; // surface the original 401, not the refresh failure
     }
@@ -102,18 +100,16 @@ function initAutoUpdater() {
   // skip wiring it up entirely rather than let it throw/spam the console.
   if (!app.isPackaged) return;
 
-  autoUpdater.on('checking-for-update', () => { updateStatus = 'checking'; updateTrayMenu(); });
-  autoUpdater.on('update-available', () => { updateStatus = 'available'; updateTrayMenu(); });
-  autoUpdater.on('update-not-available', () => { updateStatus = 'none'; updateTrayMenu(); });
+  autoUpdater.on('checking-for-update', () => { updateStatus = 'checking'; });
+  autoUpdater.on('update-available', () => { updateStatus = 'available'; });
+  autoUpdater.on('update-not-available', () => { updateStatus = 'none'; });
   autoUpdater.on('error', (err) => {
     updateStatus = 'error';
-    updateTrayMenu();
     console.error('[auto-update] error', err);
   });
-  autoUpdater.on('download-progress', () => { updateStatus = 'downloading'; updateTrayMenu(); });
+  autoUpdater.on('download-progress', () => { updateStatus = 'downloading'; });
   autoUpdater.on('update-downloaded', (info) => {
     updateStatus = 'ready';
-    updateTrayMenu();
     // A silent background download is fine, but installing must never
     // happen without the user's say-so — they may be mid clock-in/out or
     // mid-screenshot-capture. Ask, and only quitAndInstall() on "Restart Now".
@@ -131,8 +127,8 @@ function initAutoUpdater() {
   });
 
   autoUpdater.checkForUpdates().catch((err) => console.error('[auto-update] initial check failed', err));
-  // Re-check periodically for a long-lived tray session — most users never
-  // quit this app, so startup-only checks would leave long-running installs
+  // Re-check periodically for a long-lived session — most users never quit
+  // this app, so startup-only checks would leave long-running installs
   // stuck on old versions indefinitely.
   setInterval(() => {
     autoUpdater.checkForUpdates().catch((err) => console.error('[auto-update] periodic check failed', err));
@@ -143,13 +139,16 @@ function initAutoUpdater() {
 
 app.whenReady().then(() => {
   createWindow();
-  createTray();
   initAutoUpdater();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
+// No more tray icon to keep the process alive invisibly — closing the
+// window now means what it means in any normal desktop app: quit. macOS is
+// the one platform-standard exception (apps conventionally stay in the dock
+// with no open windows; `activate` above reopens one on a dock-icon click).
 app.on('window-all-closed', () => {
-  // Keep running in tray on all platforms
+  if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', async () => {
@@ -185,73 +184,14 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
-
-  mainWindow.on('close', (e) => {
-    e.preventDefault();
-    mainWindow.hide();
-  });
-}
-
-// ── Tray ──────────────────────────────────────────────────────────────────────
-
-function createTray() {
-  const iconPath = path.join(__dirname, '../assets/tray-icon.png');
-  const img = nativeImage.createFromPath(iconPath);
-  tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
-  tray.setToolTip('TekXAI Agent');
-  updateTrayMenu();
-
-  tray.on('double-click', () => {
-    mainWindow?.show();
-  });
-}
-
-const UPDATE_STATUS_LABELS = {
-  checking: 'Checking for updates…',
-  available: 'Update found — downloading…',
-  downloading: 'Downloading update…',
-  ready: '🔄 Restart to update',
-  error: 'Update check failed',
-};
-
-function updateTrayMenu() {
-  const token = store.get('auth_token');
-  const user = store.get('user');
-  const clocked = store.get('clocked_in', false);
-  const updateLabel = UPDATE_STATUS_LABELS[updateStatus];
-
-  const menu = Menu.buildFromTemplate([
-    { label: user ? `${user.first_name} ${user.last_name}` : 'Not logged in', enabled: false },
-    { label: clocked ? '🟢 Clocked In' : '⚫ Not clocked in', enabled: false },
-    { type: 'separator' },
-    { label: 'Open Agent', click: () => mainWindow?.show() },
-    { label: 'Open Dashboard', click: () => shell.openExternal(DASHBOARD_URL) },
-    { type: 'separator' },
-    ...(token ? [
-      { label: clocked ? 'Clock Out' : 'Clock In', click: () => mainWindow?.webContents.send('tray-toggle-clock') },
-      { type: 'separator' },
-    ] : []),
-    ...(updateLabel
-      ? [{
-          label: updateLabel,
-          enabled: updateStatus === 'ready',
-          click: updateStatus === 'ready' ? () => autoUpdater.quitAndInstall() : undefined,
-        }]
-      : [{
-          label: 'Check for Updates',
-          enabled: app.isPackaged,
-          click: () => autoUpdater.checkForUpdates().catch((err) => console.error('[auto-update] manual check failed', err)),
-        }]),
-    { type: 'separator' },
-    { label: 'Quit', click: () => app.quit() },
-  ]);
-  tray.setContextMenu(menu);
 }
 
 // ── IPC handlers ──────────────────────────────────────────────────────────────
 
 ipcMain.handle('get-store', (_, key) => store.get(key));
 ipcMain.handle('set-store', (_, key, value) => store.set(key, value));
+ipcMain.handle('minimize-window', () => mainWindow?.minimize());
+ipcMain.handle('close-window', () => app.quit());
 ipcMain.handle('del-store', (_, key) => store.delete(key));
 
 ipcMain.handle('login', async (_, { email, password }) => {
@@ -281,7 +221,6 @@ ipcMain.handle('login', async (_, { email, password }) => {
   store.set('auth_token', token);
   if (refreshToken) store.set('refresh_token', refreshToken);
   store.set('user', user || payload);
-  updateTrayMenu();
   return { user: user || payload };
 });
 
@@ -292,7 +231,6 @@ ipcMain.handle('logout', async () => {
   store.delete('user');
   store.set('clocked_in', false);
   sessionId = null;
-  updateTrayMenu();
 });
 
 ipcMain.handle('get-today', async () => {
@@ -360,7 +298,6 @@ ipcMain.handle('clock-in', async () => {
   } catch (_) {}
 
   store.set('clocked_in', true);
-  updateTrayMenu();
   // Re-read from store rather than reusing a captured variable — authRequest()
   // above may have refreshed the access token mid-call, and the timers below
   // need the current one, not whatever was valid when clock-in started.
@@ -395,7 +332,6 @@ ipcMain.handle('clock-out', async () => {
   }
 
   store.set('clocked_in', false);
-  updateTrayMenu();
   return res.data.payload;
 });
 
