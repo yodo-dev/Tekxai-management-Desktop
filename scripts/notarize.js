@@ -6,6 +6,13 @@ const { notarize } = require('@electron/notarize');
 // have scanned and stamped it via notarization, or Gatekeeper rejects it
 // with "could not verify ... free of malware" regardless of a valid
 // signature. Credentials come from env vars, never hardcoded.
+//
+// mac.notarize must stay `false` in package.json — electron-builder's own
+// built-in notarizer (macPackager's notarizeIfProvided) auto-triggers off
+// the same APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID env vars this
+// script needs, and without its own `notarize` config block it crashes with
+// "Cannot destructure property 'appBundleId' of 'options'" before this hook
+// ever runs. Disabling it is what lets this custom script be the only path.
 exports.default = async function notarizing(context) {
   const { electronPlatformName, appOutDir } = context;
   if (electronPlatformName !== 'darwin') return;
@@ -30,5 +37,5 @@ exports.default = async function notarizing(context) {
     appleIdPassword: APPLE_APP_SPECIFIC_PASSWORD,
     teamId: APPLE_TEAM_ID,
   });
-  console.log('[notarize] Done — app is notarized.');
+  console.log('[notarize] Done — app bundle is notarized and stapled.');
 };

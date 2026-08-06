@@ -15,7 +15,7 @@
   },
   "build": {
     "appId": "com.tekxaierp.app",
-    "productName": "TekXAI Agent",
+    "productName": "TEKxAI Agent",
     "icon": "assets/icon",
     "files": [
       "src/**/*",
@@ -42,9 +42,11 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "identity": "Tekxai LLC (64GRQF7C5Z)"
+      "identity": "Tekxai LLC (64GRQF7C5Z)",
+      "notarize": false
     },
     "afterSign": "scripts/notarize.js",
+    "afterAllArtifactBuild": "scripts/staple-dmg.js",
     "linux": {
       "target": [
         { "target": "AppImage", "arch": ["x64", "arm64"] },

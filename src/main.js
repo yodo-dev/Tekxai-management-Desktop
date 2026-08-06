@@ -8,7 +8,7 @@ const { autoUpdater } = require('electron-updater');
 // spawns a whole second Electron process instead of focusing the existing
 // one — each with its own screenshot/tracking timers, and on Windows each
 // holding its own lock on the installed files. That second condition is
-// exactly what surfaces as the installer's "TekXAI Agent cannot be closed"
+// exactly what surfaces as the installer's "TEKxAI Agent cannot be closed"
 // prompt during an upgrade: some process still has the exe/DLLs open.
 // Second launches now just focus the original window instead.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -134,7 +134,7 @@ function initAutoUpdater() {
       defaultId: 0,
       cancelId: 1,
       title: 'Update Ready',
-      message: `TekXAI Agent ${info.version} has been downloaded.`,
+      message: `TEKxAI Agent ${info.version} has been downloaded.`,
       detail: 'Restart now to apply the update, or it will install automatically the next time you quit the app.',
     }).then(({ response }) => {
       if (response === 0) autoUpdater.quitAndInstall();
