@@ -44,6 +44,7 @@
       "entitlementsInherit": "build/entitlements.mac.plist",
       "identity": "Tekxai LLC (64GRQF7C5Z)"
     },
+    "afterSign": "scripts/notarize.js",
     "linux": {
       "target": [
         { "target": "AppImage", "arch": ["x64", "arm64"] },
