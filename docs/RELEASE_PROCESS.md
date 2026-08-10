@@ -100,8 +100,12 @@ curl -X POST https://api.tekxai.services/api/v1/desktop/releases \
 
 Every installed app checks `/desktop/latest-version` at launch and every 30
 minutes thereafter. No further action needed — employees within that
-release's rollout wave see the update dialog (or, for a mandatory release,
-the blocking screen) without anyone pushing anything to them individually.
+release's rollout wave get the update downloaded silently in the background
+(Background Silent Updates, Round 3 — see `AUTO_UPDATE_SYSTEM.md`) with zero
+interruption, then see a small "Ready to Install — Restart Now / Later" card
+once it's actually finished downloading (mandatory releases: Restart Now
+only, no Later). Nobody sees a dialog before the download starts, mandatory
+or not.
 
 If you started at less than 100%, widen it from Release History's rollout
 column as confidence builds — 10% → 25% → 50% → 100%, watching Update
@@ -143,8 +147,34 @@ check, regardless of `minimum_version`. Requires a reason (shown in Release
 History) — this is for "something is actively wrong," not routine
 housekeeping. `POST /desktop/releases/:id/disable` with `{"reason": "..."}`.
 
+## Restricting a release to a specific group (Enterprise Deployment Rings)
+
+Publishing already reaches everyone in the chosen channel by default. To
+restrict a release to a Pilot Group, IT Team, specific department, or a
+named business unit instead, use Release History's **Targets** column
+(defaults to "Everyone") after publishing — add one or more
+business-unit/department/team/user targets, OR'd together. See
+`AUTO_UPDATE_SYSTEM.md`'s "Enterprise Deployment Rings" section and
+`ENTERPRISE_ROLLOUT_GUIDE.md` for a worked example.
+
 ## Testing checklist before publishing to the whole company
 
 See `PRODUCTION_CHECKLIST.md` for the full pre-release checklist, covering
 platform installs, staged rollout, channels, rollback/disable, and analytics
 verification — not duplicated here to avoid two copies drifting apart.
+
+## Further reading
+
+- **`DEPLOYMENT_GUIDE.md`** — end-to-end deployment walkthrough (build →
+  publish → verify → monitor), a narrower step-by-step companion to this
+  document for someone doing it for the first time.
+- **`ROLLBACK_GUIDE.md`** — deciding between Rollback and Emergency Disable,
+  and what happens to already-updated installs either way.
+- **`UPDATE_TROUBLESHOOTING_GUIDE.md`** — symptom → cause → fix for the
+  update pipeline (employee stuck on an old version, download failing,
+  force-update not clearing, etc).
+- **`ENTERPRISE_ROLLOUT_GUIDE.md`** — staged rollout + release channels +
+  deployment rings combined into one recommended enterprise rollout
+  playbook.
+- **`CRASH_REPORTING.md`** — the crash-reporting scaffold's architecture and
+  future Sentry/Crashpad swap-in path.

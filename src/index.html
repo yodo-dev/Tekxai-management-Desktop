@@ -239,6 +239,39 @@
       font-size: 12px; font-weight: 600; cursor: pointer; text-align: center; padding: 4px;
       text-decoration: underline;
     }
+
+    /* ── Background update indicator — small, non-blocking pill shown only
+       while a silent download is in flight. Never covers the screen and
+       never stops clicks anywhere else; the employee can ignore it
+       entirely. See renderUpdateIndicator/renderUpdateProgress/
+       renderUpdateError in renderer.js and Round 3's "Background Silent
+       Updates" — the full-screen backdrop is reserved for Ready-to-Install
+       only. ── */
+    .update-indicator {
+      display: none;
+      position: fixed; left: 10px; bottom: 10px; right: 10px;
+      align-items: center; gap: 8px;
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 8px 10px;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.12);
+      font-size: 12px; font-weight: 600; color: var(--muted);
+      z-index: 400; /* below .update-backdrop (500) so Ready-to-Install always wins */
+    }
+    .update-indicator.active { display: flex; }
+    .update-indicator.failed { color: var(--red); border-color: var(--red); }
+    .update-indicator-spinner {
+      width: 13px; height: 13px; border-radius: 50%;
+      border: 2px solid var(--border); border-top-color: var(--primary);
+      animation: update-indicator-spin 0.8s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes update-indicator-spin { to { transform: rotate(360deg); } }
+    .update-indicator-icon { font-size: 13px; flex-shrink: 0; }
+    .update-indicator-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .update-indicator-retry {
+      background: none; border: none; color: inherit; font: inherit;
+      cursor: pointer; padding: 0; text-decoration: underline;
+    }
   </style>
 </head>
 <body>
@@ -330,13 +363,18 @@
   </div>
 </div>
 
-<!-- Update overlay — one backdrop/card, content swapped by phase
-     (available / downloading / ready) in renderer.js. Sits above both the
+<!-- Update overlay — full-screen backdrop/card, reserved for "Ready to
+     Install" only (see renderer.js renderUpdateReady). Sits above both the
      login and dashboard screens (z-index 500) since a mandatory update must
      block the app before login too. -->
 <div class="update-backdrop" id="update-backdrop">
   <div class="update-card" id="update-card"></div>
 </div>
+
+<!-- Background download indicator — small non-blocking pill, active only
+     while a silent download is in flight (renderUpdateIndicator/
+     renderUpdateProgress/renderUpdateError in renderer.js). -->
+<div class="update-indicator" id="update-indicator"></div>
 
 
 <script src="renderer.js"></script>

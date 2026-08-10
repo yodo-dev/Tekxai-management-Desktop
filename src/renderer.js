@@ -40,9 +40,10 @@ let onBreak = false;
   });
 
   // Desktop update — main.js (via be-work's /desktop/latest-version) is the
-  // sole decision-maker for whether/when these fire; this renderer only
-  // reacts to what it's told.
-  window.agent.onUpdateAvailable((data) => renderUpdateAvailable(data));
+  // sole decision-maker for whether/when these fire, including when the
+  // download itself starts (Background Silent Updates — it's automatic,
+  // no click needed); this renderer only reacts to what it's told.
+  window.agent.onUpdateDownloading((data) => renderUpdateIndicator(data));
   window.agent.onUpdateProgress((data) => renderUpdateProgress(data));
   window.agent.onUpdateReady((data) => renderUpdateReady(data));
   window.agent.onUpdateError((message) => renderUpdateError(message));
@@ -400,30 +401,27 @@ function fmtDuration(sec) {
   return `${h}h ${m}m`;
 }
 
-function fmtBytesPerSec(bytesPerSecond) {
-  if (!bytesPerSecond || bytesPerSecond <= 0) return '—';
-  if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(0)} KB/s`;
-  return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
-}
-
-function fmtEta(bytesPerSecond, transferred, total) {
-  if (!bytesPerSecond || bytesPerSecond <= 0 || !total) return '—';
-  const remainingBytes = Math.max(0, total - transferred);
-  const seconds = Math.round(remainingBytes / bytesPerSecond);
-  if (seconds < 60) return `${seconds}s remaining`;
-  const minutes = Math.round(seconds / 60);
-  return `${minutes}m remaining`;
-}
-
 // ── Desktop update UI ────────────────────────────────────────────────────────
-// One backdrop/card (#update-backdrop / #update-card in index.html), content
-// swapped per phase. `updateMustForce` gates whether the user can dismiss —
-// a mandatory update (release-wide forceUpdate, being below minimumVersion,
-// or an admin's per-employee force request) removes every "Later"/dismiss
-// path and blocks the backdrop from closing, matching "Disable normal
-// application usage until update is installed."
+// Background Silent Updates: the download itself is never something the
+// employee has to notice or act on. Two surfaces:
+//
+//  1. #update-indicator — a small, non-blocking pill (never covers the
+//     screen, never stops other clicks) shown only while a download is
+//     actually in flight. This is the ONLY thing shown during download.
+//  2. #update-backdrop / #update-card — the full-screen card, reserved
+//     exclusively for "Ready to Install" once the download finishes. This is
+//     the first (and only) point active work can be interrupted.
+//
+// `updateMustForce` gates whether the ready-to-install card can be
+// dismissed — a mandatory update (release-wide forceUpdate, being below
+// minimumVersion, or an admin's per-employee force request) removes the
+// "Later" path, matching "Disable normal application usage until update is
+// installed." It never gates or delays the download itself — that always
+// starts immediately and silently regardless of mustForce.
 let updateMustForce = false;
 let currentUpdateVersion = null;
+let currentReleaseNotes = null;
+let updateIndicatorVisible = false;
 
 function showUpdateBackdrop() {
   document.getElementById('update-backdrop').classList.add('active');
@@ -433,27 +431,23 @@ function hideUpdateBackdrop() {
   document.getElementById('update-backdrop').classList.remove('active');
 }
 
-function renderUpdateAvailable({ version, releaseNotes, mustForce }) {
-  updateMustForce = !!mustForce;
-  currentUpdateVersion = version;
-
-  document.getElementById('update-card').innerHTML = `
-    <div class="update-icon${updateMustForce ? ' force' : ''}">${updateMustForce ? '⛔' : '⚡'}</div>
-    <div>
-      <div class="update-title">TekXAI Desktop Update</div>
-      <div class="update-subtitle${updateMustForce ? ' force' : ''}">
-        ${updateMustForce
-          ? 'This version is no longer supported. Please update to continue.'
-          : `Version ${escapeHtml(version)} is available.`}
-      </div>
-    </div>
-    ${renderReleaseNotesHtml(releaseNotes)}
-    <div class="update-actions">
-      ${updateMustForce ? '' : '<button class="btn btn-outline" onclick="dismissUpdateDialog()">Later</button>'}
-      <button class="btn btn-primary" onclick="startUpdateNow()">Update Now</button>
-    </div>
+// Fired the moment main.js silently starts downloading an update — never
+// interrupts, never asks for a click. Just a quiet "this is happening" pill.
+function renderUpdateIndicator({ version, mustForce }) {
+  currentUpdateVersion = version || currentUpdateVersion;
+  if (mustForce) updateMustForce = true;
+  updateIndicatorVisible = true;
+  const el = document.getElementById('update-indicator');
+  el.className = 'update-indicator active';
+  el.innerHTML = `
+    <span class="update-indicator-spinner"></span>
+    <span class="update-indicator-text" id="update-indicator-text">Downloading update…</span>
   `;
-  showUpdateBackdrop();
+}
+
+function hideUpdateIndicator() {
+  updateIndicatorVisible = false;
+  document.getElementById('update-indicator').className = 'update-indicator';
 }
 
 // Rich release notes — a small hand-rolled markdown-lite subset, same
@@ -493,46 +487,33 @@ function renderReleaseNotesHtml(raw) {
   return html ? `<div class="whats-new-label">What's New</div>${html}` : '';
 }
 
-function renderUpdateDownloading() {
-  document.getElementById('update-card').innerHTML = `
-    <div class="update-icon">⬇</div>
-    <div>
-      <div class="update-title">Downloading update…</div>
-      <div class="update-subtitle">TekXAI Desktop Update ${currentUpdateVersion ? escapeHtml(currentUpdateVersion) : ''}</div>
-    </div>
-    <div class="update-progress-percent" id="update-progress-percent">0%</div>
-    <div class="update-progress-track"><div class="update-progress-fill" id="update-progress-fill"></div></div>
-    <div class="update-progress-meta">
-      <span id="update-progress-speed">—</span>
-      <span id="update-progress-eta">—</span>
-    </div>
-    ${updateMustForce
-      ? '<div class="update-subtitle force">Please keep the app open until this finishes.</div>'
-      : '<button class="update-dismiss-link" onclick="hideUpdateBackdrop()">Continue working — I\'ll be notified when it\'s ready</button>'}
-  `;
-  showUpdateBackdrop();
-}
-
-function renderUpdateProgress({ percent, bytesPerSecond, transferred, total }) {
-  // First progress event is what actually confirms the download started —
-  // build the downloading-phase UI here rather than in startUpdateNow(),
-  // so a slow-to-start download doesn't show a stale/empty progress card.
-  if (!document.getElementById('update-progress-fill')) renderUpdateDownloading();
+// Progress updates land on the indicator pill's text only — never a big
+// card, never a progress bar the employee has to look at. Stale progress
+// events (e.g. one arriving just after a failure hid the indicator) are
+// dropped rather than resurrecting it.
+function renderUpdateProgress({ percent }) {
+  if (!updateIndicatorVisible) return;
   const pct = Math.round(percent || 0);
-  document.getElementById('update-progress-percent').textContent = `${pct}%`;
-  document.getElementById('update-progress-fill').style.width = `${pct}%`;
-  document.getElementById('update-progress-speed').textContent = fmtBytesPerSec(bytesPerSecond);
-  document.getElementById('update-progress-eta').textContent = fmtEta(bytesPerSecond, transferred, total);
+  const textEl = document.getElementById('update-indicator-text');
+  if (textEl) textEl.textContent = `Downloading update… ${pct}%`;
 }
 
-function renderUpdateReady({ version, mustForce }) {
+// The first (and only) point a silent background update can interrupt
+// active work — the download already finished, nothing left to wait on.
+// Includes the same rich release-notes rendering the pre-download dialog
+// used to show, so "What's New" isn't lost just because there's no longer a
+// pre-download step to show it at.
+function renderUpdateReady({ version, mustForce, releaseNotes }) {
+  hideUpdateIndicator();
   updateMustForce = !!mustForce || updateMustForce;
+  currentReleaseNotes = releaseNotes || currentReleaseNotes;
   document.getElementById('update-card').innerHTML = `
     <div class="update-icon">✓</div>
     <div>
       <div class="update-title">Ready to Install</div>
       <div class="update-subtitle">TekXAI Desktop Update ${version ? escapeHtml(version) : ''} has been downloaded.</div>
     </div>
+    ${renderReleaseNotesHtml(currentReleaseNotes)}
     <div class="update-actions">
       ${updateMustForce ? '' : '<button class="btn btn-outline" onclick="hideUpdateBackdrop()">Later</button>'}
       <button class="btn btn-primary" onclick="window.agent.restartAndInstall()">Restart Now</button>
@@ -541,35 +522,29 @@ function renderUpdateReady({ version, mustForce }) {
   showUpdateBackdrop();
 }
 
+// A failed background download is still just a pill, not a dialog — swap
+// the spinner for a retry link rather than interrupting with a modal. Only
+// surfaces if a download was actually in flight (updateIndicatorVisible) —
+// a routine background availability-check failure never showed the
+// indicator at all and shouldn't suddenly pop one up just to report it.
 function renderUpdateError(message) {
-  // Only surface this if the user is actually looking at the update dialog
-  // (mid-download) — a background check failure that never showed a dialog
-  // at all shouldn't suddenly pop one up just to report an error.
-  if (!document.getElementById('update-backdrop').classList.contains('active')) return;
-  document.getElementById('update-card').innerHTML = `
-    <div class="update-icon force">⚠</div>
-    <div>
-      <div class="update-title">Update Failed</div>
-      <div class="update-subtitle">${escapeHtml(message || 'Something went wrong downloading the update.')}</div>
-    </div>
-    <div class="update-actions">
-      ${updateMustForce ? '' : '<button class="btn btn-outline" onclick="hideUpdateBackdrop()">Later</button>'}
-      <button class="btn btn-primary" onclick="startUpdateNow()">Try Again</button>
-    </div>
+  if (!updateIndicatorVisible) return;
+  const el = document.getElementById('update-indicator');
+  el.className = 'update-indicator active failed';
+  el.title = message || 'Something went wrong downloading the update.';
+  el.innerHTML = `
+    <span class="update-indicator-icon">⚠</span>
+    <button class="update-indicator-text update-indicator-retry" onclick="startUpdateNow()">Update failed — retry</button>
   `;
 }
 
 async function startUpdateNow() {
-  renderUpdateDownloading();
+  renderUpdateIndicator({ version: currentUpdateVersion, mustForce: updateMustForce });
   try {
     await window.agent.startUpdateDownload();
   } catch (e) {
     renderUpdateError(e?.message || 'Failed to start the update download.');
   }
-}
-
-function dismissUpdateDialog() {
-  hideUpdateBackdrop();
 }
 
 function escapeHtml(str) {

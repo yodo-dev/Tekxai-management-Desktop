@@ -101,15 +101,21 @@ async function authRequest(requestFn) {
 //     it's mandatory, and what its release notes say. Never GitHub, never a
 //     bare comparison against electron-updater's own feed in isolation — the
 //     backend is "the update provider" from the app's point of view, full
-//     stop, and is what drives the custom dialog/progress/force-block UI in
-//     renderer.js.
+//     stop, and is what drives the non-blocking indicator / ready-to-install
+//     / force-block UI in renderer.js.
 //  2. Mechanics — electron-updater, still pointed at the generic (non-GitHub)
-//     artifact host configured in package.json's build.publish. It actually
-//     downloads, checksum-verifies, and installs the signed binary once step
-//     1 says to — proven, cross-platform code this app has no reason to
-//     reimplement. autoDownload is OFF: nothing downloads until the user
-//     clicks "Update Now" (or the app does so on their behalf for a forced
-//     update) — see desktop-update:start-download below.
+//     artifact host configured in electron-builder.config.js's publish.url.
+//     It actually downloads, checksum-verifies, and installs the signed
+//     binary once step 1 says to — proven, cross-platform code this app has
+//     no reason to reimplement. autoDownload stays OFF (this app still
+//     explicitly calls checkForUpdates()+downloadUpdate() itself, from
+//     startDownload() below, rather than letting electron-updater fire on
+//     its own timer) — but unlike earlier revisions, that call is no longer
+//     gated on a user clicking "Update Now": checkBackendVersion/
+//     reportTelemetry trigger it automatically and silently the moment an
+//     update is known to exist (Background Silent Updates — see
+//     triggerBackgroundDownload). The employee is never interrupted until
+//     the download actually finishes and 'update-downloaded' fires below.
 autoUpdater.autoDownload = false;
 autoUpdater.autoInstallOnAppQuit = true;
 
@@ -143,6 +149,31 @@ function osLabel() {
   return process.platform;
 }
 
+// Desktop Diagnostics — everything here is best-effort and platform-
+// tolerant: `fs.promises.statfs` (disk) isn't guaranteed on every platform/
+// Node build, so its failure is swallowed independently of memory/arch,
+// which come from Node's `os` module and are always available. Bytes are
+// converted to GB at the source (not left as raw bytes for the backend to
+// convert) since GB-as-a-float is literally the only thing this data is
+// ever displayed as — see prisma schema's desktop_installations comment.
+const BYTES_PER_GB = 1024 ** 3;
+async function collectDiagnostics() {
+  const diagnostics = {
+    arch: process.arch,
+    memory_total_gb: +(os.totalmem() / BYTES_PER_GB).toFixed(2),
+    memory_free_gb: +(os.freemem() / BYTES_PER_GB).toFixed(2),
+  };
+  try {
+    const fs = require('fs');
+    const stats = await fs.promises.statfs(app.getPath('userData'));
+    diagnostics.disk_total_gb = +((stats.blocks * stats.bsize) / BYTES_PER_GB).toFixed(2);
+    diagnostics.disk_free_gb = +((stats.bavail * stats.bsize) / BYTES_PER_GB).toFixed(2);
+  } catch (err) {
+    console.error('[diagnostics] disk space unavailable', err.message);
+  }
+  return diagnostics;
+}
+
 // The sole trigger for showing the update dialog or the force-update block
 // screen — called at startup and periodically. Silent on any failure
 // (network hiccup, backend down): a missed check just means "ask again next
@@ -169,14 +200,15 @@ async function checkBackendVersion() {
     desktopUpdateInfo = info;
     const current = app.getVersion();
     const isBelowMinimum = !!info.minimumVersion && compareVersions(current, info.minimumVersion) < 0;
-    const mustForce = !!info.forceUpdate || isBelowMinimum;
+    forcedUpdatePending = !!info.forceUpdate || isBelowMinimum;
     if (compareVersions(current, info.latestVersion) >= 0) return; // already current
-    forcedUpdatePending = mustForce;
-    mainWindow?.webContents.send('desktop-update:available', {
-      version: info.latestVersion,
-      releaseNotes: info.releaseNotes,
-      mustForce,
-    });
+    // Background Silent Updates: no dialog here, of any kind — mandatory or
+    // not. Start the download immediately in the background and let the
+    // employee keep working; see triggerBackgroundDownload for the one
+    // lightweight, non-blocking signal sent to the renderer while this runs.
+    // The first thing that can ever interrupt active work is the "ready to
+    // install" prompt once electron-updater's 'update-downloaded' fires.
+    triggerBackgroundDownload();
   } catch (err) {
     console.error('[desktop-update] backend version check failed', err.message);
   }
@@ -191,20 +223,18 @@ async function reportTelemetry() {
   if (!token) return;
   const axios = require('axios');
   try {
+    const diagnostics = await collectDiagnostics();
     const res = await authRequest((t) => axios.post(`${API_BASE}/desktop/telemetry`, {
       current_version: app.getVersion(),
       os: osLabel(),
       platform: process.platform,
       device: os.hostname(),
       channel: UPDATE_CHANNEL,
+      ...diagnostics,
     }, { headers: { Authorization: `Bearer ${t}` } }));
     if (res.data?.payload?.force_update_requested && desktopUpdateInfo?.latestVersion) {
       forcedUpdatePending = true;
-      mainWindow?.webContents.send('desktop-update:available', {
-        version: desktopUpdateInfo.latestVersion,
-        releaseNotes: desktopUpdateInfo.releaseNotes,
-        mustForce: true,
-      });
+      triggerBackgroundDownload();
     }
   } catch (_) {}
 }
@@ -252,6 +282,43 @@ async function reportUpdateFailure(errorMessage) {
   } catch (_) {}
 }
 
+// Actual electron-updater mechanics, shared by the silent auto-trigger
+// (triggerBackgroundDownload) and the manual retry path (the
+// desktop-update:start-download IPC handler, invoked from the renderer's
+// "Try Again" link after a failed download). Guarded by updateAttempt so a
+// background trigger and a manual retry — or two background triggers firing
+// close together from checkBackendVersion/reportTelemetry — never race into
+// a double download. Throws on failure; callers decide how to surface that.
+async function startDownload() {
+  if (updateAttempt) return; // already downloading (or about to)
+  if (!desktopUpdateInfo?.latestVersion) return;
+  updateAttempt = { fromVersion: app.getVersion(), toVersion: desktopUpdateInfo.latestVersion };
+  // The one signal the renderer gets while this runs — a small, non-blocking
+  // indicator (see renderer.js renderUpdateIndicator), never the full
+  // backdrop. The employee keeps working; nothing here can interrupt them.
+  mainWindow?.webContents.send('desktop-update:downloading', {
+    version: desktopUpdateInfo.latestVersion,
+    mustForce: forcedUpdatePending,
+  });
+  await autoUpdater.checkForUpdates();
+  await autoUpdater.downloadUpdate();
+}
+
+// Auto-triggered the moment checkBackendVersion/reportTelemetry learn an
+// update exists — silent and best-effort. Never throws: a failed background
+// download just reports the failure and lets the renderer's indicator offer
+// a manual retry (which goes through the IPC handler below instead).
+async function triggerBackgroundDownload() {
+  if (!app.isPackaged) return; // no updater wiring in an unpackaged dev run
+  try {
+    await startDownload();
+  } catch (err) {
+    console.error('[auto-update] background download failed', err.message);
+    reportUpdateFailure(err.message); // no-ops if the 'error' listener already reported it
+    mainWindow?.webContents.send('desktop-update:error', err.message);
+  }
+}
+
 function initAutoUpdater() {
   // electron-updater no-ops (and logs a warning) against an unpackaged dev
   // run — `npm start` never has a real installer to compare against, so
@@ -277,7 +344,14 @@ function initAutoUpdater() {
     // natural quit, since autoInstallOnAppQuit is on) can confirm success to
     // the backend — see reportUpdateSuccessIfPending().
     store.set('pending_update_version', info.version);
-    mainWindow?.webContents.send('desktop-update:ready', { version: info.version, mustForce: forcedUpdatePending });
+    mainWindow?.webContents.send('desktop-update:ready', {
+      version: info.version,
+      mustForce: forcedUpdatePending,
+      // Carried through from the last /desktop/latest-version check so the
+      // Ready-to-Install card can still show "What's New" now that there's
+      // no separate pre-download dialog to show it at.
+      releaseNotes: desktopUpdateInfo?.releaseNotes,
+    });
   });
 
   reportUpdateSuccessIfPending();
@@ -293,6 +367,59 @@ function initAutoUpdater() {
     reportTelemetry();
   }, 30 * 60 * 1000); // 30 minutes
 }
+
+// ── Crash reporting ───────────────────────────────────────────────────────────
+// Self-hosted scaffold — POSTs to be-work's /desktop/crash-reports, the same
+// shape a future Sentry/Crashpad/self-hosted-alternative swap-in would need
+// (see docs/CRASH_REPORTING.md). `lastKnownAction` is a lightweight, best-
+// effort breadcrumb (not a full event log) — updated at a handful of key
+// IPC handlers below, enough to answer "what was the employee doing right
+// before this," not a general analytics/replay system.
+let lastKnownAction = null;
+
+// Every IPC call from the renderer (clock-in, break, login, update actions,
+// ...) is a reasonable breadcrumb for crash reporting's last_action — wrap
+// ipcMain.handle once here rather than hand-instrumenting each of the
+// individual handlers below.
+const rawIpcHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, listener) => rawIpcHandle(channel, (...args) => {
+  lastKnownAction = channel;
+  return listener(...args);
+});
+
+async function reportCrash(stack_trace) {
+  const token = store.get('auth_token');
+  if (!token) return; // matches this app's existing telemetry limitation — no unauthenticated channel to report through
+  const axios = require('axios');
+  try {
+    await authRequest((t) => axios.post(`${API_BASE}/desktop/crash-reports`, {
+      version: app.getVersion(),
+      os: osLabel(),
+      stack_trace: String(stack_trace || 'Unknown error').slice(0, 10000),
+      last_action: lastKnownAction,
+    }, { headers: { Authorization: `Bearer ${t}` } }));
+  } catch (_) {}
+}
+
+// Main process crashes — these are genuinely fatal to this process, so the
+// crash is reported and the app exits deliberately rather than continuing
+// in a possibly-corrupt state (the same rationale Node's own docs give for
+// not resuming after an uncaughtException).
+process.on('uncaughtException', (err) => {
+  console.error('[crash] uncaughtException', err);
+  reportCrash(err?.stack || err?.message).finally(() => app.exit(1));
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[crash] unhandledRejection', reason);
+  reportCrash(reason?.stack || String(reason));
+});
+
+// Renderer crashes (as opposed to main-process crashes above) — the window
+// itself survives, so this is reported without exiting the app.
+app.on('render-process-gone', (_event, _webContents, details) => {
+  console.error('[crash] render-process-gone', details);
+  reportCrash(`Renderer process gone: reason=${details?.reason}, exitCode=${details?.exitCode}`);
+});
 
 // ── App ready ─────────────────────────────────────────────────────────────────
 
@@ -587,18 +714,19 @@ ipcMain.handle('open-dashboard', () => {
 
 // ── Desktop update IPC ───────────────────────────────────────────────────────
 
-// "Update Now" clicked (or auto-triggered for a mandatory update) — confirms
-// electron-updater's own feed also has this version (it independently
-// verifies against the artifact host's manifest/checksums; our backend's
-// /desktop/latest-version is the decision, this is the actual secure
-// mechanics) and starts the background download. autoDownload is off, so
-// nothing transfers before this is explicitly called.
+// Manual retry only — every normal update is started automatically by
+// triggerBackgroundDownload the moment one is known to exist (see
+// checkBackendVersion/reportTelemetry). This handler exists for the
+// renderer's "Try Again" link after a background download failed
+// (updateAttempt was cleared by that failure, so startDownload() proceeds
+// rather than no-opping). Confirms electron-updater's own feed also has
+// this version (it independently verifies against the artifact host's
+// manifest/checksums; our backend's /desktop/latest-version is the
+// decision, this is the actual secure mechanics).
 ipcMain.handle('desktop-update:start-download', async () => {
   if (!app.isPackaged) throw new Error('Updates are only available in the installed app, not this dev build.');
-  updateAttempt = { fromVersion: app.getVersion(), toVersion: desktopUpdateInfo?.latestVersion || 'unknown' };
   try {
-    await autoUpdater.checkForUpdates();
-    await autoUpdater.downloadUpdate();
+    await startDownload();
   } catch (err) {
     // May already have been reported by the 'error' event listener above if
     // electron-updater emitted one for this same failure — reportUpdateFailure

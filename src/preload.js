@@ -18,13 +18,16 @@ contextBridge.exposeInMainWorld('agent', {
   onSessionExpired: (cb)          => ipcRenderer.on('session-expired', cb),
 
   // Desktop auto-update — main.js is the sole source of truth for whether an
-  // update exists/is mandatory (via be-work's /desktop/latest-version); this
-  // bridge just carries that decision and electron-updater's own download
-  // progress into the renderer's UI, and carries the user's "Update Now" /
-  // "Restart Now" clicks back.
+  // update exists/is mandatory (via be-work's /desktop/latest-version) and
+  // now also for WHEN the download starts: it triggers silently in the
+  // background the moment one is known to exist (Background Silent
+  // Updates), no renderer click required. This bridge carries that
+  // background-download signal, electron-updater's own progress, and the
+  // eventual "ready to install" prompt into the renderer's UI, and carries
+  // the user's "Restart Now" (or a manual "Try Again" after a failure) back.
   startUpdateDownload:  ()        => ipcRenderer.invoke('desktop-update:start-download'),
   restartAndInstall:    ()        => ipcRenderer.invoke('desktop-update:restart-and-install'),
-  onUpdateAvailable:    (cb)      => ipcRenderer.on('desktop-update:available', (_e, data) => cb(data)),
+  onUpdateDownloading:  (cb)      => ipcRenderer.on('desktop-update:downloading', (_e, data) => cb(data)),
   onUpdateProgress:     (cb)      => ipcRenderer.on('desktop-update:progress', (_e, data) => cb(data)),
   onUpdateReady:        (cb)      => ipcRenderer.on('desktop-update:ready', (_e, data) => cb(data)),
   onUpdateError:        (cb)      => ipcRenderer.on('desktop-update:error', (_e, message) => cb(message)),

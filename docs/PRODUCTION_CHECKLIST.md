@@ -55,12 +55,19 @@ underlying config changes, not on every release.
       in the progress UI/logs is meaningfully smaller than the full
       installer for a small change) — confirms the blockmap pipeline is
       intact, not just assumed working because it usually is.
-- [ ] Background download doesn't block the app — clock in/out, screenshots
-      continue working mid-download.
+- [ ] **Background Silent Updates (Round 3)** — no dialog appears the moment
+      an update is detected, for mandatory or optional releases alike; the
+      download starts immediately and silently (a small non-blocking pill
+      is the only visible sign). Clock in/out, screenshots, and normal use
+      continue working mid-download without interruption.
+- [ ] The "Ready to Install" card is the *only* point the app interrupts —
+      confirm it only appears once the download has actually finished, not
+      before.
 - [ ] Interrupted download (kill network mid-transfer) — app doesn't crash,
-      "Update Now" can be retried from the error state.
-- [ ] Optional update can be dismissed ("Later") and re-prompts on the next
-      periodic check (or immediately on next launch).
+      the indicator pill shows "Update failed — retry" and retrying works.
+- [ ] Optional "Ready to Install" can be dismissed ("Later") and the app
+      remains usable; the pending install still applies automatically on
+      next natural quit (`autoInstallOnAppQuit`).
 - [ ] Restart Now installs and relaunches at the new version automatically;
       `last_successful_update_at` populates in Desktop Management afterward.
 
@@ -91,6 +98,20 @@ underlying config changes, not on every release.
       reflect what actually happened, including at least one deliberately
       failed update (e.g. disconnect network mid-download) showing up under
       Failed Updates.
+- [ ] **Deployment ring targeting (Round 3)** — target a test release to a
+      business_unit/department/team/user that does NOT match your test
+      account, confirm `/desktop/latest-version` returns no update for it;
+      add a matching target (OR'd with the first), confirm it now does.
+      Confirm an untargeted release still reaches everyone, unchanged.
+- [ ] **Desktop Diagnostics (Round 3)** — confirm a real telemetry ping
+      populates arch/disk/memory in the Desktop Diagnostics table, and that
+      an older installation with no diagnostics data yet shows "—" rather
+      than an error.
+- [ ] **Crash Reporting (Round 3)** — trigger a real crash on a packaged
+      build (not `npm start`) and confirm it appears in Crash Reports with
+      the correct version/OS/stack trace/last action; confirm status
+      transitions (Open → Acknowledged → Resolved/Ignored) work from the
+      admin UI.
 
 ## Sign-off
 
@@ -104,8 +125,14 @@ underlying config changes, not on every release.
       during an actual incident.
 
 This checklist has not been executed end-to-end as part of building this
-system — every backend endpoint was verified live via curl, and the admin UI
-was verified live in a browser, but the Electron desktop app's own UI could
-not be visually driven in the environment this was built in (no GUI
-display). Run this checklist in full, on real hardware/VMs for each
-platform, before the first real company-wide release.
+system — every backend endpoint (across all three rounds, including
+Round 3's deployment-ring targeting, diagnostics telemetry, and crash
+reporting) was verified live via curl, and the admin UI was verified live in
+a browser, but the Electron desktop app's own UI could not be visually
+driven in the environment this was built in (no GUI display). Run this
+checklist in full, on real hardware/VMs for each platform, before the first
+real company-wide release.
+
+See also: `DEPLOYMENT_GUIDE.md`, `ROLLBACK_GUIDE.md`,
+`UPDATE_TROUBLESHOOTING_GUIDE.md`, `ENTERPRISE_ROLLOUT_GUIDE.md`, and
+`CRASH_REPORTING.md` for narrower how-to companions to this checklist.
