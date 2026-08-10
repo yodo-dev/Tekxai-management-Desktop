@@ -115,6 +115,13 @@ autoUpdater.autoInstallOnAppQuit = true;
 
 let desktopUpdateInfo = null; // last GET /desktop/latest-version payload, cached for the download/progress/ready IPC round-trip
 let forcedUpdatePending = false;
+// Set only while a real download is in flight (from "Update Now"/an
+// auto-triggered forced update through to success or failure) — this is
+// what distinguishes an update-analytics-worthy failure from an ordinary
+// background-check failure (network hiccup on the periodic check, no
+// download ever attempted). Cleared on success or once a failure's been
+// reported, whichever comes first — see reportUpdateFailure.
+let updateAttempt = null; // { fromVersion, toVersion } | null
 
 // Same integer-segment comparison as be-work's desktop.controller.js
 // compare_versions() — plain string comparison ("1.10.0" >= "1.9.0") is
@@ -141,10 +148,22 @@ function osLabel() {
 // (network hiccup, backend down): a missed check just means "ask again next
 // interval," never a crash or a false "you must update" prompt blocking
 // someone's whole day over a transient network blip.
+// 'stable' is the only channel this app currently opts into — there's no
+// UI to switch (not requested), but the backend already supports 'beta'/
+// 'internal'/'development' for whenever that's added. `uid` is the last
+// logged-in user's id, if this install has ever logged in — purely for the
+// backend's staged-rollout percentage bucketing (§ see be-work's
+// desktop.controller.js is_in_rollout), never sent as or treated as an auth
+// credential.
+const UPDATE_CHANNEL = 'stable';
+
 async function checkBackendVersion() {
   const axios = require('axios');
   try {
-    const res = await axios.get(`${API_BASE}/desktop/latest-version`);
+    const cachedUser = store.get('user');
+    const params = new URLSearchParams({ channel: UPDATE_CHANNEL });
+    if (cachedUser?.id) params.set('uid', cachedUser.id);
+    const res = await axios.get(`${API_BASE}/desktop/latest-version?${params.toString()}`);
     const info = res.data?.payload;
     if (!info?.latestVersion) return; // no release registered yet — nothing to do
     desktopUpdateInfo = info;
@@ -177,6 +196,7 @@ async function reportTelemetry() {
       os: osLabel(),
       platform: process.platform,
       device: os.hostname(),
+      channel: UPDATE_CHANNEL,
     }, { headers: { Authorization: `Bearer ${t}` } }));
     if (res.data?.payload?.force_update_requested && desktopUpdateInfo?.latestVersion) {
       forcedUpdatePending = true;
@@ -208,6 +228,30 @@ async function reportUpdateSuccessIfPending() {
   } catch (_) {}
 }
 
+// Update Analytics' "Failed Updates" — only called for a failure that
+// actually happened mid-update (updateAttempt set), never for a routine
+// background availability check that simply couldn't reach the backend.
+// Best-effort like every other telemetry call here — a failure to *report*
+// a failure shouldn't itself throw or block the UI from showing the user
+// what went wrong (renderer already gets the raw error via
+// desktop-update:error regardless of whether this succeeds).
+async function reportUpdateFailure(errorMessage) {
+  if (!updateAttempt) return;
+  const { fromVersion, toVersion } = updateAttempt;
+  updateAttempt = null;
+  const token = store.get('auth_token');
+  if (!token) return;
+  const axios = require('axios');
+  try {
+    await authRequest((t) => axios.post(`${API_BASE}/desktop/telemetry/update-failure`, {
+      from_version: fromVersion,
+      to_version: toVersion,
+      error_message: String(errorMessage || 'Unknown error').slice(0, 2000),
+      os: osLabel(),
+    }, { headers: { Authorization: `Bearer ${t}` } }));
+  } catch (_) {}
+}
+
 function initAutoUpdater() {
   // electron-updater no-ops (and logs a warning) against an unpackaged dev
   // run — `npm start` never has a real installer to compare against, so
@@ -217,6 +261,7 @@ function initAutoUpdater() {
   autoUpdater.on('error', (err) => {
     console.error('[auto-update] error', err);
     mainWindow?.webContents.send('desktop-update:error', err.message);
+    reportUpdateFailure(err.message); // no-ops if updateAttempt isn't set (a background check, not an in-flight update)
   });
   autoUpdater.on('download-progress', (progress) => {
     mainWindow?.webContents.send('desktop-update:progress', {
@@ -227,6 +272,7 @@ function initAutoUpdater() {
     });
   });
   autoUpdater.on('update-downloaded', (info) => {
+    updateAttempt = null; // succeeded — nothing to report as a failure
     // Stash the version so the next launch (after "Restart Now" or the next
     // natural quit, since autoInstallOnAppQuit is on) can confirm success to
     // the backend — see reportUpdateSuccessIfPending().
@@ -549,10 +595,15 @@ ipcMain.handle('open-dashboard', () => {
 // nothing transfers before this is explicitly called.
 ipcMain.handle('desktop-update:start-download', async () => {
   if (!app.isPackaged) throw new Error('Updates are only available in the installed app, not this dev build.');
+  updateAttempt = { fromVersion: app.getVersion(), toVersion: desktopUpdateInfo?.latestVersion || 'unknown' };
   try {
     await autoUpdater.checkForUpdates();
     await autoUpdater.downloadUpdate();
   } catch (err) {
+    // May already have been reported by the 'error' event listener above if
+    // electron-updater emitted one for this same failure — reportUpdateFailure
+    // no-ops on a second call since it clears updateAttempt on the first.
+    reportUpdateFailure(err.message);
     throw toIpcSafeError(err);
   }
 });

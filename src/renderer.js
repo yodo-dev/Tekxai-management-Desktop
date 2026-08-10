@@ -436,10 +436,6 @@ function hideUpdateBackdrop() {
 function renderUpdateAvailable({ version, releaseNotes, mustForce }) {
   updateMustForce = !!mustForce;
   currentUpdateVersion = version;
-  const notes = (releaseNotes || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
 
   document.getElementById('update-card').innerHTML = `
     <div class="update-icon${updateMustForce ? ' force' : ''}">${updateMustForce ? '⛔' : '⚡'}</div>
@@ -451,16 +447,50 @@ function renderUpdateAvailable({ version, releaseNotes, mustForce }) {
           : `Version ${escapeHtml(version)} is available.`}
       </div>
     </div>
-    ${notes.length ? `
-      <div class="whats-new-label">What's New</div>
-      <ul class="whats-new-list">${notes.map((n) => `<li>${escapeHtml(n)}</li>`).join('')}</ul>
-    ` : ''}
+    ${renderReleaseNotesHtml(releaseNotes)}
     <div class="update-actions">
       ${updateMustForce ? '' : '<button class="btn btn-outline" onclick="dismissUpdateDialog()">Later</button>'}
       <button class="btn btn-primary" onclick="startUpdateNow()">Update Now</button>
     </div>
   `;
   showUpdateBackdrop();
+}
+
+// Rich release notes — a small hand-rolled markdown-lite subset, same
+// "only ever needs to round-trip what this app's own admin panel writes,
+// not arbitrary external markdown" convention fe-work's chat module already
+// established for the identical problem (messageContent.tsx). Supports:
+// `## Section Header` (bold subheading, not a bullet), `- item`/`* item` or
+// a bare line (both become a bullet — bare lines are what every release
+// published before this feature already used, so old-style plain notes
+// still render exactly as before), and inline `**bold**`. Deliberately not
+// a general markdown parser — headers/bullets/bold cover everything a
+// release-notes field needs.
+function renderReleaseNotesInline(text) {
+  return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+function renderReleaseNotesHtml(raw) {
+  const lines = (raw || '').split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+  if (!lines.length) return '';
+  let html = '';
+  let bullets = [];
+  const flushBullets = () => {
+    if (!bullets.length) return;
+    html += `<ul class="whats-new-list">${bullets.map((b) => `<li>${renderReleaseNotesInline(b)}</li>`).join('')}</ul>`;
+    bullets = [];
+  };
+  for (const line of lines) {
+    const headerMatch = /^#{1,3}\s*(.+)$/.exec(line);
+    if (headerMatch) {
+      flushBullets();
+      html += `<div class="whats-new-label">${renderReleaseNotesInline(headerMatch[1])}</div>`;
+      continue;
+    }
+    const bulletMatch = /^[-*]\s+(.+)$/.exec(line);
+    bullets.push(bulletMatch ? bulletMatch[1] : line);
+  }
+  flushBullets();
+  return html ? `<div class="whats-new-label">What's New</div>${html}` : '';
 }
 
 function renderUpdateDownloading() {

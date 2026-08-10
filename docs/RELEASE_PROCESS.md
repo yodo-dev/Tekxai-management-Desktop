@@ -64,14 +64,18 @@ only) and fill in:
 |---|---|
 | Version | Exactly matches `package.json`'s version from step 1 |
 | Minimum Supported Version | The floor below which every app is force-updated, regardless of this specific release's mandatory flag — usually left at whatever it already was unless you're deliberately raising the floor |
-| Mandatory | Check this only if this specific release must not be skippable (e.g. a security fix) — otherwise leave unchecked so employees get the normal dismissible dialog |
-| Release Notes | One bullet per line — shown verbatim in the update dialog's "What's New" |
+| Release Channel | `stable` for the normal employee population; `beta`/`internal`/`development` for a subset only that channel's installs will ever see — see `AUTO_UPDATE_SYSTEM.md`'s "Release channels" |
+| Staged Rollout | 10/25/50/100% — for a routine release, publish at 100%; for a risk-averse rollout, start at 10%, watch Update Analytics for a while, then widen via the Release History table's rollout dropdown (no need to re-publish) |
+| Mandatory | Check this only if this specific release must not be skippable (e.g. a security fix) — bypasses staged rollout entirely, so a 10%-rollout release with this checked still reaches everyone immediately |
+| Release Notes | Supports `## Section headers`, `- bullets`, and `**bold**` — see "Rich release notes" below. Plain lines with no markdown still work exactly as before |
 | Windows / macOS / Linux URLs | Direct links to the installers uploaded in step 2 (e.g. `https://releases.tekxai.services/desktop-app/TEKxAI-Agent-Setup-1.2.0.exe`) |
 
 This calls `POST /api/v1/desktop/releases`, which creates a `desktop_releases`
-row. The newest row (by publish time, not by highest version number — see
-`desktop.controller.js`'s comment on why) is what `GET /desktop/latest-version`
-returns to every desktop app on its next check.
+row. The newest **`status: 'ACTIVE'`** row in the target channel (by publish
+time, not by highest version number — see `desktop.controller.js`'s comment
+on why) is what `GET /desktop/latest-version` returns to every desktop app on
+its next check, further filtered by staged-rollout bucketing unless the
+release is mandatory.
 
 Equivalent direct API call, if scripting this instead of using the admin UI:
 
@@ -82,8 +86,10 @@ curl -X POST https://api.tekxai.services/api/v1/desktop/releases \
   -d '{
     "version": "1.2.0",
     "minimum_version": "1.0.0",
+    "channel": "stable",
+    "rollout_percentage": 10,
     "force_update": false,
-    "release_notes": "Chat improvements\nAttendance fixes\nSecurity enhancements",
+    "release_notes": "## New Features\n- **Dark mode**\n## Bug Fixes\n- Fixed crash on startup",
     "windows_url": "https://releases.tekxai.services/desktop-app/TEKxAI-Agent-Setup-1.2.0.exe",
     "mac_url": "https://releases.tekxai.services/desktop-app/TEKxAI-Agent-1.2.0.dmg",
     "linux_url": "https://releases.tekxai.services/desktop-app/TEKxAI-Agent-1.2.0.AppImage"
@@ -93,46 +99,52 @@ curl -X POST https://api.tekxai.services/api/v1/desktop/releases \
 ## 4. Rollout happens automatically
 
 Every installed app checks `/desktop/latest-version` at launch and every 30
-minutes thereafter. No further action needed — employees see the update
-dialog (or, for a mandatory release, the blocking screen) without anyone
-pushing anything to them individually.
+minutes thereafter. No further action needed — employees within that
+release's rollout wave see the update dialog (or, for a mandatory release,
+the blocking screen) without anyone pushing anything to them individually.
+
+If you started at less than 100%, widen it from Release History's rollout
+column as confidence builds — 10% → 25% → 50% → 100%, watching Update
+Analytics' failed-update count between each step. There's no "promote"
+button beyond changing that dropdown; it's the same
+`PATCH /desktop/releases/:id/rollout` call either way.
 
 ## 5. Monitor rollout
 
-Administration → Desktop Management's **Outdated Employees** table shows, in
-real time (as telemetry pings arrive), who's still behind. Use **Force
-Update** on stragglers if a release needs to land faster than the passive
-dialog achieves on its own — this doesn't bypass the user's device, it just
-flags that specific employee's next telemetry check to trigger the same
-mandatory-update UI everyone else would see for a release-wide `force_update`.
+Administration → Desktop Management gives three views, all live:
 
-## Rollback (not yet implemented)
+- **Outdated Employees** — who's still behind, with a per-employee **Force
+  Update** action for stragglers (flags their next telemetry check, doesn't
+  bypass their device).
+- **Update Analytics** — version distribution across the whole fleet, plus
+  pending/successful/failed counts for the lookback window. A spike in
+  failed updates for the version you just published is the signal to stop
+  widening the rollout and investigate before going further.
+- **Release History** — every published release with its channel, rollout
+  percentage, and status (Active/Rolled Back/Disabled).
 
-The admin panel's Release History table has a disabled "Rollback" button —
-intentionally present but non-functional, flagged as a future deliverable per
-the auto-update system's phased scope. Until it exists, "rolling back" means
-publishing a new release row whose `version` is higher than the bad one (so
-the comparison logic still treats it as "latest") but which points at the
-previous good installer's URLs — a manual workaround, not a real rollback
-feature.
+## Rollback
+
+If a release turns out to be bad, click **Rollback** on it in Release
+History (or `POST /desktop/releases/:id/rollback`). No follow-up step needed
+— the previous active release in that channel automatically becomes "latest"
+again for every subsequent check, since "latest" always excludes
+non-`ACTIVE` rows. A rolled-back version stays in history (for the audit
+trail) but can never become "latest" again unless a fresh release
+re-publishes that exact version number.
+
+## Emergency disable
+
+If a release is actively causing harm (crashes, data loss, a security
+issue) rather than just "not great," use **Disable** instead of Rollback —
+same "never latest again" effect, plus every install currently *running*
+that exact version gets force-updated away from it on its next telemetry
+check, regardless of `minimum_version`. Requires a reason (shown in Release
+History) — this is for "something is actively wrong," not routine
+housekeeping. `POST /desktop/releases/:id/disable` with `{"reason": "..."}`.
 
 ## Testing checklist before publishing to the whole company
 
-- [ ] Windows: fresh install, then update from the previous version
-- [ ] macOS: fresh install (notarization/Gatekeeper passes), then update
-- [ ] Linux: AppImage and deb, fresh install and update
-- [ ] Background download doesn't block the app — clock in/out, screenshots
-      continue working mid-download
-- [ ] Interrupted download (kill network mid-transfer) — app doesn't crash,
-      "Update Now" can be retried
-- [ ] Force update (`force_update: true` or below `minimum_version`) actually
-      blocks normal use, with no dismiss path
-- [ ] Optional update can be dismissed and re-prompts on the next periodic
-      check
-- [ ] Restart Now installs and relaunches at the new version automatically
-- [ ] `last_successful_update_at` populates in Desktop Management after the
-      relaunch
-
-This checklist has **not** been executed as part of building this system —
-see `AUTO_UPDATE_SYSTEM.md`'s "Known limitations" for exactly what was and
-wasn't verified. Run it before the first real company-wide rollout.
+See `PRODUCTION_CHECKLIST.md` for the full pre-release checklist, covering
+platform installs, staged rollout, channels, rollback/disable, and analytics
+verification — not duplicated here to avoid two copies drifting apart.
