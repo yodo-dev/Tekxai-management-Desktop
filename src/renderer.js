@@ -10,6 +10,7 @@ let startEpoch = 0;
 let priorSeconds = 0;
 let tickInterval = null;
 let screenshotCount = 0;
+let onBreak = false;
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
@@ -166,9 +167,10 @@ async function refreshToday() {
       startEpoch = checkIn;
       priorSeconds = data.entry.prior_seconds || 0;
       clockedIn = true; clockedOut = false;
+      onBreak = data.entry.status === 'ON_BREAK';
       setTrackerUI('active');
       startTick();
-      setSsIndicator(true);
+      setSsIndicator(!onBreak);
 
       const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       document.getElementById('stat-checkin').textContent = checkinTime;
@@ -184,11 +186,35 @@ async function refreshToday() {
       document.getElementById('stat-today').textContent = fmtDuration(dur);
       const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       document.getElementById('stat-checkin').textContent = checkinTime;
+    } else {
+      // Never clocked in today, or the backend already force-closed the
+      // session (e.g. auto-checkout at shift end) before we asked — either
+      // way there's nothing active to show.
+      clockedIn = false; clockedOut = false;
+      priorSeconds = 0;
+      stopTick();
+      setSsIndicator(false);
+      setTrackerUI('idle');
     }
   } catch (_) {}
 }
 
 // ── Clock in / out ────────────────────────────────────────────────────────────
+
+function applyClockOutResult(entry) {
+  clockedIn = false; clockedOut = true;
+  stopTick();
+  // entry.duration_sec is only THIS session's length (each check-in/out is
+  // its own row) — add the sessions already completed earlier today so the
+  // display shows the full daily total, not just the last session.
+  const sessionDur = entry.duration_sec || entry.duration_seconds || 0;
+  const dailyTotal = priorSeconds + sessionDur;
+  document.getElementById('tracker-time').textContent = fmtHms(dailyTotal);
+  document.getElementById('stat-today').textContent = fmtDuration(dailyTotal);
+  priorSeconds = dailyTotal;
+  setTrackerUI('done');
+  setSsIndicator(false);
+}
 
 async function doClock(action) {
   const btnIn  = document.getElementById('btn-clock-in');
@@ -203,6 +229,7 @@ async function doClock(action) {
       // instead of restarting the timer from zero on a second check-in.
       priorSeconds = entry.prior_seconds || 0;
       clockedIn = true; clockedOut = false;
+      onBreak = false;
       screenshotCount = 0;
       setTrackerUI('active');
       startTick();
@@ -212,22 +239,76 @@ async function doClock(action) {
     } else {
       actRow.innerHTML = '<button class="btn btn-outline" disabled>Clocking out…</button>';
       const entry = await window.agent.clockOut();
-      clockedIn = false; clockedOut = true;
-      stopTick();
-      // entry.duration_sec is only THIS session's length (each check-in/out
-      // is its own row) — add the sessions already completed earlier today
-      // so the display shows the full daily total, not just the last session.
-      const sessionDur = entry.duration_sec || entry.duration_seconds || 0;
-      const dailyTotal = priorSeconds + sessionDur;
-      document.getElementById('tracker-time').textContent = fmtHms(dailyTotal);
-      document.getElementById('stat-today').textContent = fmtDuration(dailyTotal);
-      priorSeconds = dailyTotal;
-      setTrackerUI('done');
-      setSsIndicator(false);
+      applyClockOutResult(entry);
     }
   } catch (e) {
-    setTrackerUI(clockedIn ? 'active' : 'idle');
-    alert(e?.response?.data?.message || e?.message || 'Action failed');
+    if (action === 'out') {
+      const rawMsg = e?.response?.data?.message || e?.message || 'Action failed';
+      // The Daily Report gate (main.js's clock-out handler) isn't a stale-
+      // state error like the ones below — the session is still genuinely
+      // open. Offer the spec's "Skip and submit later" escape hatch rather
+      // than just failing the click.
+      if (/Daily Report required/i.test(rawMsg)) {
+        const skip = confirm(`${rawMsg}\n\nSkip and submit later?`);
+        if (skip) {
+          try {
+            actRow.innerHTML = '<button class="btn btn-outline" disabled>Clocking out…</button>';
+            const entry = await window.agent.clockOut({ skip: true });
+            applyClockOutResult(entry);
+          } catch (e2) {
+            setTrackerUI(clockedIn ? 'active' : 'idle');
+            alert(e2?.message || 'Action failed');
+          }
+        } else {
+          setTrackerUI('active');
+        }
+        return;
+      }
+      // Don't trust the pre-click local state here — a failed clock-out
+      // (e.g. the backend already force-closed the session via auto-checkout
+      // before the user clicked) means our local "active/ticking" state is
+      // stale. Refetch the real state so the UI never gets stuck showing an
+      // active session that no longer exists on the backend.
+      await refreshToday();
+      // ipcRenderer.invoke only carries the Error's message across the
+      // bridge, not response.status (see toIpcSafeError in main.js) — so we
+      // match on the known backend message text instead of a status code.
+      const msg = /no active clock-in/i.test(rawMsg)
+        ? 'Your session was already ended automatically (e.g. at end of shift). You are now shown as clocked out.'
+        : rawMsg;
+      alert(msg);
+    } else {
+      setTrackerUI(clockedIn ? 'active' : 'idle');
+      alert(e?.response?.data?.message || e?.message || 'Action failed');
+    }
+  }
+}
+
+// ── Break ─────────────────────────────────────────────────────────────────────
+
+async function doBreak() {
+  const actRow = document.getElementById('tracker-actions');
+  try {
+    if (!onBreak) {
+      actRow.querySelector('#btn-break')?.setAttribute('disabled', 'true');
+      await window.agent.breakStart();
+      onBreak = true;
+    } else {
+      actRow.querySelector('#btn-break')?.setAttribute('disabled', 'true');
+      await window.agent.breakEnd();
+      onBreak = false;
+    }
+    setTrackerUI('active');
+  } catch (e) {
+    // Local break state may be out of sync with the backend (e.g. the
+    // session was already force-closed) — resync from the real source of
+    // truth rather than trusting the pre-click guess.
+    await refreshToday();
+    const rawMsg = e?.response?.data?.message || e?.message || 'Action failed';
+    const msg = /no active clock-in/i.test(rawMsg)
+      ? 'Your session was already ended automatically (e.g. at end of shift). You are now shown as clocked out.'
+      : rawMsg;
+    alert(msg);
   }
 }
 
@@ -243,11 +324,18 @@ function setTrackerUI(state) {
   if (state === 'idle') {
     statusEl.classList.add('status-idle');
     textEl.textContent = 'Not clocked in';
+    onBreak = false;
     actRow.innerHTML = '<button class="btn btn-green" onclick="doClock(\'in\')">▶ Clock In</button>';
   } else if (state === 'active') {
-    statusEl.classList.add('status-active');
-    textEl.textContent = 'Clocked in';
+    if (onBreak) {
+      statusEl.classList.add('status-break');
+      textEl.textContent = 'On break';
+    } else {
+      statusEl.classList.add('status-active');
+      textEl.textContent = 'Clocked in';
+    }
     actRow.innerHTML = `
+      <button class="btn btn-outline" id="btn-break" onclick="doBreak()">${onBreak ? '▶ Resume' : '⏸ Take Break'}</button>
       <button class="btn btn-red"    onclick="doClock('out')">■ Clock Out</button>
     `;
   } else if (state === 'done') {

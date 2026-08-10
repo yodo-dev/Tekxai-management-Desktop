@@ -336,8 +336,31 @@ ipcMain.handle('clock-in', async () => {
   return entry;
 });
 
-ipcMain.handle('clock-out', async () => {
+ipcMain.handle('clock-out', async (event, opts) => {
   const axios = require('axios');
+  const skip_report_gate = opts?.skip === true;
+
+  // Daily Report gate — the report itself is submitted on the web ERP (not
+  // here), so this only checks status before letting checkout complete.
+  // Never blocks on its own failure (network hiccup, etc.) — only an
+  // explicit "report required and missing" response holds up checkout.
+  if (!skip_report_gate) {
+    try {
+      const status_res = await authRequest((token) => axios.get(`${API_BASE}/timesheet/compliance-status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }));
+      const status = status_res.data?.payload;
+      if (status?.report_required && !status?.report_submitted) {
+        const err = new Error('Daily Report required before checkout — submit it on the web dashboard, or choose to skip and submit later.');
+        err.is_report_gate = true;
+        throw err;
+      }
+    } catch (err) {
+      if (err.is_report_gate) throw err; // re-throw as-is — caught again below and turned into a safe IPC error
+      // Any other failure (network, endpoint down) — don't block checkout
+      // over a compliance check that couldn't even run.
+    }
+  }
 
   stopScreenshots();
 
@@ -347,6 +370,23 @@ ipcMain.handle('clock-out', async () => {
       headers: { Authorization: `Bearer ${token}` },
     }));
   } catch (err) {
+    // 404 here means the backend has no open session for us to close — most
+    // often the auto-checkout job (shift-end grace period) already force-closed
+    // it before the user got to click Clock Out. That's not a failed action,
+    // it's a stale local state: reconcile the store now so we don't keep
+    // reporting "clocked in" after a restart, and end the monitoring session
+    // that's still open locally.
+    if (err.response?.status === 404) {
+      store.set('clocked_in', false);
+      if (sessionId) {
+        try {
+          await authRequest((token) => axios.post(`${API_BASE}/monitoring/session/${sessionId}/end`, {}, {
+            headers: { Authorization: `Bearer ${token}` },
+          }));
+        } catch (_) {}
+        sessionId = null;
+      }
+    }
     throw toIpcSafeError(err);
   }
 
@@ -362,6 +402,39 @@ ipcMain.handle('clock-out', async () => {
 
   store.set('clocked_in', false);
   return res.data.payload;
+});
+
+// Manual equivalent of the auto-checkout job's idle-triggered ON_BREAK flip
+// (be-work scheduler/jobs/auto-checkout.job.js) — same backend status, just
+// user-initiated instead of idle-triggered. Screenshot/app-usage capture is
+// paused for the same reason the job pauses it on idle: nothing worth
+// recording while the user has stepped away on purpose.
+ipcMain.handle('break-start', async () => {
+  const axios = require('axios');
+  try {
+    const res = await authRequest((token) => axios.post(`${API_BASE}/timesheet/break/start`, {}, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    stopScreenshots();
+    return res.data.payload;
+  } catch (err) {
+    throw toIpcSafeError(err);
+  }
+});
+
+ipcMain.handle('break-end', async () => {
+  const axios = require('axios');
+  try {
+    const res = await authRequest((token) => axios.post(`${API_BASE}/timesheet/break/end`, {}, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    const currentToken = store.get('auth_token');
+    startScreenshots(currentToken);
+    startAppUsage(currentToken);
+    return res.data.payload;
+  } catch (err) {
+    throw toIpcSafeError(err);
+  }
 });
 
 ipcMain.handle('open-dashboard', () => {
