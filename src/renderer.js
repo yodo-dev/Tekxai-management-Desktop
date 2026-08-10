@@ -38,6 +38,14 @@ let onBreak = false;
     if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
     showLogin('Your session expired. Please sign in again.');
   });
+
+  // Desktop update — main.js (via be-work's /desktop/latest-version) is the
+  // sole decision-maker for whether/when these fire; this renderer only
+  // reacts to what it's told.
+  window.agent.onUpdateAvailable((data) => renderUpdateAvailable(data));
+  window.agent.onUpdateProgress((data) => renderUpdateProgress(data));
+  window.agent.onUpdateReady((data) => renderUpdateReady(data));
+  window.agent.onUpdateError((message) => renderUpdateError(message));
 })();
 
 // ── Login ─────────────────────────────────────────────────────────────────────
@@ -390,4 +398,152 @@ function fmtDuration(sec) {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   return `${h}h ${m}m`;
+}
+
+function fmtBytesPerSec(bytesPerSecond) {
+  if (!bytesPerSecond || bytesPerSecond <= 0) return '—';
+  if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(0)} KB/s`;
+  return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
+}
+
+function fmtEta(bytesPerSecond, transferred, total) {
+  if (!bytesPerSecond || bytesPerSecond <= 0 || !total) return '—';
+  const remainingBytes = Math.max(0, total - transferred);
+  const seconds = Math.round(remainingBytes / bytesPerSecond);
+  if (seconds < 60) return `${seconds}s remaining`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes}m remaining`;
+}
+
+// ── Desktop update UI ────────────────────────────────────────────────────────
+// One backdrop/card (#update-backdrop / #update-card in index.html), content
+// swapped per phase. `updateMustForce` gates whether the user can dismiss —
+// a mandatory update (release-wide forceUpdate, being below minimumVersion,
+// or an admin's per-employee force request) removes every "Later"/dismiss
+// path and blocks the backdrop from closing, matching "Disable normal
+// application usage until update is installed."
+let updateMustForce = false;
+let currentUpdateVersion = null;
+
+function showUpdateBackdrop() {
+  document.getElementById('update-backdrop').classList.add('active');
+}
+function hideUpdateBackdrop() {
+  if (updateMustForce) return; // mandatory — no dismiss path, ever
+  document.getElementById('update-backdrop').classList.remove('active');
+}
+
+function renderUpdateAvailable({ version, releaseNotes, mustForce }) {
+  updateMustForce = !!mustForce;
+  currentUpdateVersion = version;
+  const notes = (releaseNotes || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  document.getElementById('update-card').innerHTML = `
+    <div class="update-icon${updateMustForce ? ' force' : ''}">${updateMustForce ? '⛔' : '⚡'}</div>
+    <div>
+      <div class="update-title">TekXAI Desktop Update</div>
+      <div class="update-subtitle${updateMustForce ? ' force' : ''}">
+        ${updateMustForce
+          ? 'This version is no longer supported. Please update to continue.'
+          : `Version ${escapeHtml(version)} is available.`}
+      </div>
+    </div>
+    ${notes.length ? `
+      <div class="whats-new-label">What's New</div>
+      <ul class="whats-new-list">${notes.map((n) => `<li>${escapeHtml(n)}</li>`).join('')}</ul>
+    ` : ''}
+    <div class="update-actions">
+      ${updateMustForce ? '' : '<button class="btn btn-outline" onclick="dismissUpdateDialog()">Later</button>'}
+      <button class="btn btn-primary" onclick="startUpdateNow()">Update Now</button>
+    </div>
+  `;
+  showUpdateBackdrop();
+}
+
+function renderUpdateDownloading() {
+  document.getElementById('update-card').innerHTML = `
+    <div class="update-icon">⬇</div>
+    <div>
+      <div class="update-title">Downloading update…</div>
+      <div class="update-subtitle">TekXAI Desktop Update ${currentUpdateVersion ? escapeHtml(currentUpdateVersion) : ''}</div>
+    </div>
+    <div class="update-progress-percent" id="update-progress-percent">0%</div>
+    <div class="update-progress-track"><div class="update-progress-fill" id="update-progress-fill"></div></div>
+    <div class="update-progress-meta">
+      <span id="update-progress-speed">—</span>
+      <span id="update-progress-eta">—</span>
+    </div>
+    ${updateMustForce
+      ? '<div class="update-subtitle force">Please keep the app open until this finishes.</div>'
+      : '<button class="update-dismiss-link" onclick="hideUpdateBackdrop()">Continue working — I\'ll be notified when it\'s ready</button>'}
+  `;
+  showUpdateBackdrop();
+}
+
+function renderUpdateProgress({ percent, bytesPerSecond, transferred, total }) {
+  // First progress event is what actually confirms the download started —
+  // build the downloading-phase UI here rather than in startUpdateNow(),
+  // so a slow-to-start download doesn't show a stale/empty progress card.
+  if (!document.getElementById('update-progress-fill')) renderUpdateDownloading();
+  const pct = Math.round(percent || 0);
+  document.getElementById('update-progress-percent').textContent = `${pct}%`;
+  document.getElementById('update-progress-fill').style.width = `${pct}%`;
+  document.getElementById('update-progress-speed').textContent = fmtBytesPerSec(bytesPerSecond);
+  document.getElementById('update-progress-eta').textContent = fmtEta(bytesPerSecond, transferred, total);
+}
+
+function renderUpdateReady({ version, mustForce }) {
+  updateMustForce = !!mustForce || updateMustForce;
+  document.getElementById('update-card').innerHTML = `
+    <div class="update-icon">✓</div>
+    <div>
+      <div class="update-title">Ready to Install</div>
+      <div class="update-subtitle">TekXAI Desktop Update ${version ? escapeHtml(version) : ''} has been downloaded.</div>
+    </div>
+    <div class="update-actions">
+      ${updateMustForce ? '' : '<button class="btn btn-outline" onclick="hideUpdateBackdrop()">Later</button>'}
+      <button class="btn btn-primary" onclick="window.agent.restartAndInstall()">Restart Now</button>
+    </div>
+  `;
+  showUpdateBackdrop();
+}
+
+function renderUpdateError(message) {
+  // Only surface this if the user is actually looking at the update dialog
+  // (mid-download) — a background check failure that never showed a dialog
+  // at all shouldn't suddenly pop one up just to report an error.
+  if (!document.getElementById('update-backdrop').classList.contains('active')) return;
+  document.getElementById('update-card').innerHTML = `
+    <div class="update-icon force">⚠</div>
+    <div>
+      <div class="update-title">Update Failed</div>
+      <div class="update-subtitle">${escapeHtml(message || 'Something went wrong downloading the update.')}</div>
+    </div>
+    <div class="update-actions">
+      ${updateMustForce ? '' : '<button class="btn btn-outline" onclick="hideUpdateBackdrop()">Later</button>'}
+      <button class="btn btn-primary" onclick="startUpdateNow()">Try Again</button>
+    </div>
+  `;
+}
+
+async function startUpdateNow() {
+  renderUpdateDownloading();
+  try {
+    await window.agent.startUpdateDownload();
+  } catch (e) {
+    renderUpdateError(e?.message || 'Failed to start the update download.');
+  }
+}
+
+function dismissUpdateDialog() {
+  hideUpdateBackdrop();
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str == null ? '' : String(str);
+  return div.innerHTML;
 }

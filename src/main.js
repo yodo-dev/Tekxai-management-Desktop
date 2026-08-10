@@ -1,5 +1,6 @@
-const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
+const os = require('os');
 const Store = require('electron-store');
 const { autoUpdater } = require('electron-updater');
 
@@ -22,14 +23,6 @@ const store = new Store();
 const API_BASE = 'https://api.tekxai.services/api/v1';
 const DASHBOARD_URL = 'https://tekxai.services/employee';
 const SCREENSHOT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-
-// Update feed: see package.json "build.publish" (generic provider). Every
-// installed app checks this URL on startup and every 4 hours; a matching
-// installer + latest.yml/latest-mac.yml must be uploaded there on release
-// (electron-builder's --publish flag does this automatically given AWS/
-// generic-server credentials on the build machine — see release docs).
-let updateStatus = 'idle'; // idle | checking | available | downloading | ready | none | error
-
 
 let mainWindow = null;
 let screenshotTimer = null;
@@ -101,13 +94,119 @@ async function authRequest(requestFn) {
 }
 
 // ── Auto-update ───────────────────────────────────────────────────────────────
-
-// autoDownload: fetch the update in the background as soon as one is found,
-// so it's ready the moment the user is willing to restart — matches how
-// most desktop apps (Slack, VS Code, etc.) behave, no extra click required
-// to start the download.
-autoUpdater.autoDownload = true;
+// Two deliberately separate layers:
+//
+//  1. Decision — GET be-work's /desktop/latest-version. This is the ONLY
+//     source this app trusts to decide whether an update exists, whether
+//     it's mandatory, and what its release notes say. Never GitHub, never a
+//     bare comparison against electron-updater's own feed in isolation — the
+//     backend is "the update provider" from the app's point of view, full
+//     stop, and is what drives the custom dialog/progress/force-block UI in
+//     renderer.js.
+//  2. Mechanics — electron-updater, still pointed at the generic (non-GitHub)
+//     artifact host configured in package.json's build.publish. It actually
+//     downloads, checksum-verifies, and installs the signed binary once step
+//     1 says to — proven, cross-platform code this app has no reason to
+//     reimplement. autoDownload is OFF: nothing downloads until the user
+//     clicks "Update Now" (or the app does so on their behalf for a forced
+//     update) — see desktop-update:start-download below.
+autoUpdater.autoDownload = false;
 autoUpdater.autoInstallOnAppQuit = true;
+
+let desktopUpdateInfo = null; // last GET /desktop/latest-version payload, cached for the download/progress/ready IPC round-trip
+let forcedUpdatePending = false;
+
+// Same integer-segment comparison as be-work's desktop.controller.js
+// compare_versions() — plain string comparison ("1.10.0" >= "1.9.0") is
+// wrong for semver, and this app and the backend must agree on the answer.
+function compareVersions(a, b) {
+  const pa = String(a || '0').split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b || '0').split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+function osLabel() {
+  if (process.platform === 'darwin') return 'macOS';
+  if (process.platform === 'win32') return 'Windows';
+  if (process.platform === 'linux') return 'Linux';
+  return process.platform;
+}
+
+// The sole trigger for showing the update dialog or the force-update block
+// screen — called at startup and periodically. Silent on any failure
+// (network hiccup, backend down): a missed check just means "ask again next
+// interval," never a crash or a false "you must update" prompt blocking
+// someone's whole day over a transient network blip.
+async function checkBackendVersion() {
+  const axios = require('axios');
+  try {
+    const res = await axios.get(`${API_BASE}/desktop/latest-version`);
+    const info = res.data?.payload;
+    if (!info?.latestVersion) return; // no release registered yet — nothing to do
+    desktopUpdateInfo = info;
+    const current = app.getVersion();
+    const isBelowMinimum = !!info.minimumVersion && compareVersions(current, info.minimumVersion) < 0;
+    const mustForce = !!info.forceUpdate || isBelowMinimum;
+    if (compareVersions(current, info.latestVersion) >= 0) return; // already current
+    forcedUpdatePending = mustForce;
+    mainWindow?.webContents.send('desktop-update:available', {
+      version: info.latestVersion,
+      releaseNotes: info.releaseNotes,
+      mustForce,
+    });
+  } catch (err) {
+    console.error('[desktop-update] backend version check failed', err.message);
+  }
+}
+
+// Best-effort — reports this install's current version/OS/platform/device so
+// Administration → Desktop Management can see who's outdated. Also the only
+// authenticated channel this app has, so an admin's per-employee "Force
+// Update" (independent of the release-wide mandatory flag) surfaces here.
+async function reportTelemetry() {
+  const token = store.get('auth_token');
+  if (!token) return;
+  const axios = require('axios');
+  try {
+    const res = await authRequest((t) => axios.post(`${API_BASE}/desktop/telemetry`, {
+      current_version: app.getVersion(),
+      os: osLabel(),
+      platform: process.platform,
+      device: os.hostname(),
+    }, { headers: { Authorization: `Bearer ${t}` } }));
+    if (res.data?.payload?.force_update_requested && desktopUpdateInfo?.latestVersion) {
+      forcedUpdatePending = true;
+      mainWindow?.webContents.send('desktop-update:available', {
+        version: desktopUpdateInfo.latestVersion,
+        releaseNotes: desktopUpdateInfo.releaseNotes,
+        mustForce: true,
+      });
+    }
+  } catch (_) {}
+}
+
+// If the app was relaunched right after installing an update (see
+// update-downloaded below, which stashes the version it just installed),
+// confirm to the backend that the new version actually came up successfully
+// — this is what populates last_successful_update_at, distinct from
+// last_update_check_at.
+async function reportUpdateSuccessIfPending() {
+  const pendingVersion = store.get('pending_update_version');
+  if (!pendingVersion || pendingVersion !== app.getVersion()) return;
+  store.delete('pending_update_version');
+  const token = store.get('auth_token');
+  if (!token) return;
+  const axios = require('axios');
+  try {
+    await authRequest((t) => axios.post(`${API_BASE}/desktop/telemetry/update-success`, {
+      version: app.getVersion(),
+    }, { headers: { Authorization: `Bearer ${t}` } }));
+  } catch (_) {}
+}
 
 function initAutoUpdater() {
   // electron-updater no-ops (and logs a warning) against an unpackaged dev
@@ -115,39 +214,38 @@ function initAutoUpdater() {
   // skip wiring it up entirely rather than let it throw/spam the console.
   if (!app.isPackaged) return;
 
-  autoUpdater.on('checking-for-update', () => { updateStatus = 'checking'; });
-  autoUpdater.on('update-available', () => { updateStatus = 'available'; });
-  autoUpdater.on('update-not-available', () => { updateStatus = 'none'; });
   autoUpdater.on('error', (err) => {
-    updateStatus = 'error';
     console.error('[auto-update] error', err);
+    mainWindow?.webContents.send('desktop-update:error', err.message);
   });
-  autoUpdater.on('download-progress', () => { updateStatus = 'downloading'; });
-  autoUpdater.on('update-downloaded', (info) => {
-    updateStatus = 'ready';
-    // A silent background download is fine, but installing must never
-    // happen without the user's say-so — they may be mid clock-in/out or
-    // mid-screenshot-capture. Ask, and only quitAndInstall() on "Restart Now".
-    dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      buttons: ['Restart Now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'Update Ready',
-      message: `TEKxAI Agent ${info.version} has been downloaded.`,
-      detail: 'Restart now to apply the update, or it will install automatically the next time you quit the app.',
-    }).then(({ response }) => {
-      if (response === 0) autoUpdater.quitAndInstall();
+  autoUpdater.on('download-progress', (progress) => {
+    mainWindow?.webContents.send('desktop-update:progress', {
+      percent: progress.percent,
+      bytesPerSecond: progress.bytesPerSecond,
+      transferred: progress.transferred,
+      total: progress.total,
     });
   });
+  autoUpdater.on('update-downloaded', (info) => {
+    // Stash the version so the next launch (after "Restart Now" or the next
+    // natural quit, since autoInstallOnAppQuit is on) can confirm success to
+    // the backend — see reportUpdateSuccessIfPending().
+    store.set('pending_update_version', info.version);
+    mainWindow?.webContents.send('desktop-update:ready', { version: info.version, mustForce: forcedUpdatePending });
+  });
 
-  autoUpdater.checkForUpdates().catch((err) => console.error('[auto-update] initial check failed', err));
+  reportUpdateSuccessIfPending();
+  checkBackendVersion();
+  reportTelemetry();
   // Re-check periodically for a long-lived session — most users never quit
-  // this app, so startup-only checks would leave long-running installs
-  // stuck on old versions indefinitely.
+  // this app, so startup-only checks would leave long-running installs (and
+  // a mandatory update) stuck indefinitely. Short enough that a force-update
+  // reaches an already-open session promptly; long enough not to hammer the
+  // backend for what's a cheap GET+POST either way.
   setInterval(() => {
-    autoUpdater.checkForUpdates().catch((err) => console.error('[auto-update] periodic check failed', err));
-  }, 4 * 60 * 60 * 1000); // 4 hours
+    checkBackendVersion();
+    reportTelemetry();
+  }, 30 * 60 * 1000); // 30 minutes
 }
 
 // ── App ready ─────────────────────────────────────────────────────────────────
@@ -439,6 +537,28 @@ ipcMain.handle('break-end', async () => {
 
 ipcMain.handle('open-dashboard', () => {
   shell.openExternal(DASHBOARD_URL);
+});
+
+// ── Desktop update IPC ───────────────────────────────────────────────────────
+
+// "Update Now" clicked (or auto-triggered for a mandatory update) — confirms
+// electron-updater's own feed also has this version (it independently
+// verifies against the artifact host's manifest/checksums; our backend's
+// /desktop/latest-version is the decision, this is the actual secure
+// mechanics) and starts the background download. autoDownload is off, so
+// nothing transfers before this is explicitly called.
+ipcMain.handle('desktop-update:start-download', async () => {
+  if (!app.isPackaged) throw new Error('Updates are only available in the installed app, not this dev build.');
+  try {
+    await autoUpdater.checkForUpdates();
+    await autoUpdater.downloadUpdate();
+  } catch (err) {
+    throw toIpcSafeError(err);
+  }
+});
+
+ipcMain.handle('desktop-update:restart-and-install', () => {
+  autoUpdater.quitAndInstall();
 });
 
 // ── Screenshot capture ────────────────────────────────────────────────────────
