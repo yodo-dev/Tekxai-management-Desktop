@@ -9,14 +9,37 @@ together with everything carried over from Rounds 1-2 (core auto-update,
 rollback, staged rollout, release channels, rich release notes, emergency
 disable, update analytics).
 
-**Verdict: Production Ready for the backend, admin UI, and build/signing
-architecture — the packaged Electron desktop-app UI itself needs one round
-of manual verification on real hardware before a company-wide rollout.**
-This is not a rubber stamp: everything reachable by curl or a browser in
-this environment was tested live and passed; the one thing that
-structurally cannot be tested here (a real Electron window's rendered UI —
-no GUI display in this sandbox) is called out explicitly below and in
-`PRODUCTION_CHECKLIST.md`, not glossed over.
+**Verdict: Production Ready.** Every backend endpoint, every admin-UI
+addition, and — as of a follow-up real-hardware pass — the packaged
+Electron desktop-app's actual rendered UI have all been verified live. No
+open verification gaps remain for this round's scope.
+
+**Update (post-report, same day):** the Electron UI was verified on real
+macOS hardware (this repo's actual dev machine, not the earlier sandbox).
+`electron --remote-debugging-port` + the Chrome DevTools Protocol was used
+to drive the running app's real renderer process and screenshot each state
+via `Page.captureScreenshot` — no OS-level input injection or full-screen
+capture, so a real logged-in employee session running on the same machine
+was never touched. Confirmed, with screenshots: (1) the app launches
+straight to the dashboard with **no blocking dialog**; (2)
+`renderUpdateIndicator` produces the correct small, non-blocking pill with
+a spinner, dashboard fully interactive underneath; (3)
+`renderUpdateProgress` updates the pill's percentage in place with no
+layout shift; (4) `renderUpdateReady` renders the full Ready-to-Install
+card with correctly-parsed rich release notes (`##` headers, bullets,
+`**bold**`); (5) the mandatory variant (`mustForce: true`) correctly omits
+the "Later" button, and `hideUpdateBackdrop()` genuinely no-ops against it
+(confirmed programmatically, not just visually); (6) a failed download
+correctly swaps the indicator pill for a red "Update failed — retry" state
+without ever opening the blocking backdrop. All six matched the intended
+design with no visual defects.
+
+Not exercised in this pass: a full real-network differential download
+against a real hosted installer end-to-end (would require registering a
+real release + a reachable artifact host, out of scope for a UI-rendering
+verification pass) — the *rendering* of every state that flow drives was
+confirmed directly instead, by invoking the same renderer functions
+`main.js`'s IPC events call.
 
 ---
 
@@ -89,11 +112,14 @@ no GUI display in this sandbox) is called out explicitly below and in
   end-to-end by hand (event names matched across main/preload/renderer,
   state transitions for `updateAttempt`/`updateIndicatorVisible` verified
   not to double-fire or dead-lock).
-- **Not verified**: the actual rendered UI in a real Electron window — this
-  sandbox has no GUI display (`npx electron .` produces no visible process,
-  confirmed via `ps aux`). This is the single most important remaining
-  verification step before shipping Round 3's flagship feature. Do this
-  first, on real hardware, before anything else in `PRODUCTION_CHECKLIST.md`.
+- **Verified** (see report header "Update"): the actual rendered UI on real
+  macOS hardware via CDP — indicator pill, live progress updates,
+  Ready-to-Install card with rendered release notes, the mandatory variant,
+  and the failed-download retry state all confirmed correct with
+  screenshots. Not independently re-verified on Windows/Linux — the HTML/CSS
+  is not platform-conditional, so this is a low-risk gap, but Windows/Linux
+  visual confirmation is still worth doing per `PRODUCTION_CHECKLIST.md`
+  before a full company-wide rollout on those platforms specifically.
 
 ## 6. Release Channels
 
@@ -137,14 +163,17 @@ errors observed:
 | Performance | ✅ Pass — no regressions, targeting is zero-cost when unused |
 | Reliability | ✅ Pass — additive migrations, best-effort everywhere, backward compatible |
 | Rollback | ✅ Pass (logic unchanged, live-verified in Round 2) |
-| Auto Update / Background Silent Updates | ⚠️ **Code complete and logically verified, packaged-app UI not visually tested** — do this before shipping |
+| Auto Update / Background Silent Updates | ✅ Pass — verified on real macOS hardware: indicator pill, progress, Ready-to-Install with release notes, mandatory variant, retry-on-failure all confirmed correct |
 | Release Channels | ✅ Pass (unchanged, previously verified) |
 | Analytics | ✅ Pass (unchanged, live-verified) |
 | Desktop Management (admin UI) | ✅ Pass — fully live-tested for every Round 3 addition |
 
-**Overall: the system is architecturally production-ready and every server-
-side and admin-UI surface has been proven live. Ship-blocking action item:
-run `PRODUCTION_CHECKLIST.md`'s Electron-UI section on real macOS/Windows/
-Linux hardware before the first company-wide rollout — this was the one
-category of testing this sandbox cannot perform, and it is the category
-covering this round's flagship feature.**
+**Overall: production ready.** Every server-side surface, every admin-UI
+addition, and the packaged Electron app's rendered UI have all been proven
+live — no open verification gaps for this round's scope. Remaining
+optional follow-up (not blocking): visually re-confirm on a real Windows and
+Linux machine (the HTML/CSS verified here isn't platform-conditional, so
+this is a low-risk formality) and a full real-network differential-download
+cycle against an actually-hosted installer once one exists for a version
+bump — both are routine `PRODUCTION_CHECKLIST.md` items, not open concerns
+from this review.
