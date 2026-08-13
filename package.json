@@ -1,6 +1,6 @@
 {
   "name": "tekxai-agent",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "TekXAI Desktop Agent — time tracking & screenshot monitoring",
   "main": "src/main.js",
   "author": {
@@ -9,9 +9,9 @@
   },
   "scripts": {
     "start": "electron .",
-    "build:win": "electron-builder --win",
-    "build:mac": "electron-builder --mac",
-    "build:linux": "electron-builder --linux"
+    "build:win": "electron-builder --win --config electron-builder.config.js",
+    "build:mac": "electron-builder --mac --config electron-builder.config.js && node scripts/sync-update-yml.js",
+    "build:linux": "electron-builder --linux --config electron-builder.config.js"
   },
   "dependencies": {
     "active-win": "^8.1.1",

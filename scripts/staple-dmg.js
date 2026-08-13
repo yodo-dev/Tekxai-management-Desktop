@@ -8,6 +8,19 @@ const { notarize } = require('@electron/notarize');
 // found". @electron/notarize's notarize() does submit+staple in one call
 // (staple defaults to true), so just point it at the .dmg directly instead
 // of trying to staple a ticket that was never requested.
+//
+// Stapling rewrites the .dmg in place (embeds the ticket), which changes its
+// bytes, so latest-mac.yml's DMG entry needs the same fixup — but NOT here.
+// electron-builder computes+queues that entry's sha512/size the moment the
+// DMG artifact is first created (pre-staple), and only actually writes
+// latest-mac.yml to disk *after* this afterAllArtifactBuild hook's promise
+// resolves (PublishManager.awaitTasks() -> writeUpdateInfoFiles(), called
+// from the outer executeFinally in app-builder-lib's index.js — not exposed
+// as a hook). So latest-mac.yml doesn't even exist on disk yet at the point
+// this hook runs, and patching it from here either no-ops silently or gets
+// clobbered by that later write. See scripts/sync-update-yml.js, run as a
+// separate step in package.json's build:mac *after* electron-builder fully
+// exits, for the actual fix.
 exports.default = async function afterAllArtifactBuild(buildResult) {
   const { APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID } = process.env;
   if (!APPLE_ID || !APPLE_APP_SPECIFIC_PASSWORD || !APPLE_TEAM_ID) return [];
