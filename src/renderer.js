@@ -197,6 +197,11 @@ async function refreshToday() {
       // interval keeps overwriting the frozen duration below every second.
       stopTick();
       setTrackerUI('done');
+      // Same leftover-state issue as stopTick() above: if screenshots were
+      // active going into this resync (session was live a moment ago), the
+      // indicator stays stuck on "Monitoring active" unless explicitly
+      // turned off here too — applyClockOutResult() already does this.
+      setSsIndicator(false);
       const dur = data.entry.duration_seconds || 0;
       document.getElementById('tracker-time').textContent = fmtHms(dur);
       document.getElementById('stat-today').textContent = fmtDuration(dur);
