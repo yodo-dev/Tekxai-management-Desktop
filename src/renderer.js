@@ -189,6 +189,13 @@ async function refreshToday() {
     } else if (data.clocked_in && data.clocked_out) {
       clockedIn = false; clockedOut = true;
       priorSeconds = 0;
+      // A tickInterval from a previously-active session (restored earlier by
+      // the branch above) may still be running — e.g. the backend's own
+      // auto-checkout job closed this session before we found out, so we
+      // land here via a resync rather than via applyClockOutResult(), which
+      // is the only other place that stops it. Without this, the stale
+      // interval keeps overwriting the frozen duration below every second.
+      stopTick();
       setTrackerUI('done');
       const dur = data.entry.duration_seconds || 0;
       document.getElementById('tracker-time').textContent = fmtHms(dur);
