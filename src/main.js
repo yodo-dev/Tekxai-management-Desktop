@@ -540,7 +540,49 @@ ipcMain.handle('get-today', async () => {
     const res = await authRequest((token) => axios.get(`${API_BASE}/timesheet/today`, {
       headers: { Authorization: `Bearer ${token}` },
     }));
-    return res.data.payload;
+    const payload = res.data.payload;
+
+    // Root-cause fix for the "reopens on break after an update" bug:
+    // startScreenshots/startAppUsage were previously only ever started from
+    // the clock-in and break-end IPC handlers — never from this resync path,
+    // which is the ONLY thing that runs on a fresh app launch (including an
+    // auto-updater relaunch). So a genuinely-working session that survives
+    // an app restart stopped reporting app_usage_logs the moment the old
+    // process quit, and never resumed. be-work's auto-checkout job (see
+    // auto-checkout.job.js) treats that silence as real idle time and, once
+    // idle_timeout_minutes (default 15) elapses with zero fresh activity, it
+    // legitimately flips the session to ON_BREAK (break_source: 'IDLE') —
+    // the renderer then correctly (and truthfully) shows "On Break" on
+    // reopen, because by then it genuinely IS on break per the backend's own
+    // records. The bug was never in how break state gets restored (that
+    // already treats the backend as authoritative, correctly) — it was that
+    // this app silently stopped holding up its end of the activity contract
+    // across a restart, which is what caused the backend to (correctly, by
+    // its own rules) create that break in the first place.
+    //
+    // Fix: resync monitoring to match the real backend status every time
+    // this resolves, not just on explicit clock-in/break-end. If the entry
+    // is open and NOT on break, resume screenshots/app-usage so a restart
+    // (update or otherwise) never again produces a silent activity gap long
+    // enough to trigger the idle job. If the entry IS on break — including a
+    // break that already existed before this restart — leave/put monitoring
+    // stopped, exactly like a manual break does; this is what correctly
+    // preserves a genuine active break instead of clearing it. Both
+    // startScreenshots/startAppUsage and stopScreenshots already start by
+    // clearing their own timers, so calling them redundantly here is safe.
+    if (payload?.clocked_in && !payload?.clocked_out) {
+      const currentToken = store.get('auth_token');
+      if (payload.entry?.status === 'ON_BREAK') {
+        stopScreenshots();
+      } else {
+        startScreenshots(currentToken);
+        startAppUsage(currentToken);
+      }
+    } else {
+      stopScreenshots();
+    }
+
+    return payload;
   } catch (err) {
     throw toIpcSafeError(err);
   }
