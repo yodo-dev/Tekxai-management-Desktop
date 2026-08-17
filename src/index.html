@@ -376,6 +376,17 @@
      renderUpdateProgress/renderUpdateError in renderer.js). -->
 <div class="update-indicator" id="update-indicator"></div>
 
+<!-- Mandatory Daily Report gate — reuses the same full-screen backdrop/card
+     classes as the update overlay above (own id, so the two can never
+     collide) but is populated separately (showReportRequiredModal in
+     renderer.js). No "Skip Now"/dismiss path exists here — the only way
+     out is submitting the report (opens the existing web Daily Report
+     page) and retrying checkout; server-side enforcement in
+     POST /timesheet/clock-out is the real boundary, this is just the UI. -->
+<div class="update-backdrop" id="report-required-backdrop">
+  <div class="update-card" id="report-required-card"></div>
+</div>
+
 
 <script src="renderer.js"></script>
 </body>

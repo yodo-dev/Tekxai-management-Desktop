@@ -265,24 +265,14 @@ async function doClock(action) {
   } catch (e) {
     if (action === 'out') {
       const rawMsg = e?.response?.data?.message || e?.message || 'Action failed';
-      // The Daily Report gate (main.js's clock-out handler) isn't a stale-
-      // state error like the ones below — the session is still genuinely
-      // open. Offer the spec's "Skip and submit later" escape hatch rather
-      // than just failing the click.
-      if (/Daily Report required/i.test(rawMsg)) {
-        const skip = confirm(`${rawMsg}\n\nSkip and submit later?`);
-        if (skip) {
-          try {
-            actRow.innerHTML = '<button class="btn btn-outline" disabled>Clocking out…</button>';
-            const entry = await window.agent.clockOut({ skip: true });
-            applyClockOutResult(entry);
-          } catch (e2) {
-            setTrackerUI(clockedIn ? 'active' : 'idle');
-            alert(e2?.message || 'Action failed');
-          }
-        } else {
-          setTrackerUI('active');
-        }
+      // Mandatory Daily Report gate — be-work's POST /timesheet/clock-out
+      // now enforces this server-side (returns code REPORT_REQUIRED, see
+      // timesheets.controller.js) and never accepts a skip. There is no
+      // bypass here either: no "Skip Now" path, just the required-report
+      // modal and a retry once it's actually submitted.
+      if (e?.code === 'REPORT_REQUIRED' || /Daily Report required/i.test(rawMsg)) {
+        setTrackerUI('active');
+        showReportRequiredModal();
         return;
       }
       // Don't trust the pre-click local state here — a failed clock-out
@@ -548,6 +538,47 @@ function renderUpdateError(message) {
     <span class="update-indicator-icon">⚠</span>
     <button class="update-indicator-text update-indicator-retry" onclick="startUpdateNow()">Update failed — retry</button>
   `;
+}
+
+// ── Mandatory Daily Report gate ─────────────────────────────────────────────
+// No dismiss/"Skip Now" path — closing this only options are "Open Daily
+// Report" (reuses the existing web page, the only place a report can
+// actually be submitted) and "I've Submitted — Retry Checkout", which
+// re-runs the exact same clockOut() the button always used, so the backend
+// (POST /timesheet/clock-out, the real authority) decides again from
+// scratch — this UI never assumes success.
+function showReportRequiredModal() {
+  document.getElementById('report-required-card').innerHTML = `
+    <div class="update-icon force">📋</div>
+    <div>
+      <div class="update-title">Daily Report Required</div>
+      <div class="update-subtitle force">You must submit your Daily Report before you can check out.</div>
+    </div>
+    <div class="update-actions">
+      <button class="btn btn-outline" onclick="window.agent.openDailyReport()">Open Daily Report</button>
+      <button class="btn btn-primary" onclick="retryCheckoutAfterReport()">I've Submitted — Retry Checkout</button>
+    </div>
+  `;
+  document.getElementById('report-required-backdrop').classList.add('active');
+}
+function hideReportRequiredModal() {
+  document.getElementById('report-required-backdrop').classList.remove('active');
+}
+async function retryCheckoutAfterReport() {
+  const btn = document.querySelector('#report-required-card .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const entry = await window.agent.clockOut();
+    hideReportRequiredModal();
+    applyClockOutResult(entry);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = "I've Submitted — Retry Checkout"; }
+    // Still missing (or another failure) — stay on the modal rather than
+    // silently closing it; the employee hasn't actually submitted yet.
+    if (e?.code !== 'REPORT_REQUIRED' && !/Daily Report required/i.test(e?.message || '')) {
+      alert(e?.message || 'Checkout failed. Please try again.');
+    }
+  }
 }
 
 async function startUpdateNow() {

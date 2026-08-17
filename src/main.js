@@ -42,7 +42,14 @@ let lastAppStart = null;
 // just that string so it survives IPC serialization intact.
 function toIpcSafeError(err) {
   const backendMessage = err?.response?.data?.message;
-  return new Error(backendMessage || err?.message || 'Request failed');
+  const safe = new Error(backendMessage || err?.message || 'Request failed');
+  // Plain Error properties (not just .message) DO survive structured-clone
+  // across contextBridge/ipcRenderer.invoke — carry the backend's
+  // machine-readable `code` (e.g. REPORT_REQUIRED) through too, so the
+  // renderer can branch on it instead of pattern-matching message text.
+  const backendCode = err?.response?.data?.code;
+  if (backendCode) safe.code = backendCode;
+  return safe;
 }
 
 // JWT_EXPIRES_IN is 15 minutes server-side, so every authenticated call needs
@@ -649,30 +656,35 @@ ipcMain.handle('clock-in', async () => {
   return entry;
 });
 
-ipcMain.handle('clock-out', async (event, opts) => {
+ipcMain.handle('clock-out', async () => {
   const axios = require('axios');
-  const skip_report_gate = opts?.skip === true;
 
-  // Daily Report gate — the report itself is submitted on the web ERP (not
-  // here), so this only checks status before letting checkout complete.
-  // Never blocks on its own failure (network hiccup, etc.) — only an
-  // explicit "report required and missing" response holds up checkout.
-  if (!skip_report_gate) {
-    try {
-      const status_res = await authRequest((token) => axios.get(`${API_BASE}/timesheet/compliance-status`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }));
-      const status = status_res.data?.payload;
-      if (status?.report_required && !status?.report_submitted) {
-        const err = new Error('Daily Report required before checkout — submit it on the web dashboard, or choose to skip and submit later.');
-        err.is_report_gate = true;
-        throw err;
-      }
-    } catch (err) {
-      if (err.is_report_gate) throw err; // re-throw as-is — caught again below and turned into a safe IPC error
-      // Any other failure (network, endpoint down) — don't block checkout
-      // over a compliance check that couldn't even run.
+  // Daily Report gate — REAL enforcement now lives server-side (POST
+  // /timesheet/clock-out itself returns 422 {code: 'REPORT_REQUIRED'} if
+  // missing, see be-work's timesheets.controller.js — no skip parameter is
+  // sent or honored anywhere in this app anymore). This is only a fast,
+  // advisory pre-check so the UI can show the report-required modal
+  // without waiting on a full checkout round-trip; if it fails to run
+  // (network hiccup) or disagrees with the backend for any reason, the
+  // actual clock-out call below is still the authoritative check and will
+  // reject with the same REPORT_REQUIRED code either way.
+  try {
+    const status_res = await authRequest((token) => axios.get(`${API_BASE}/timesheet/compliance-status`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    const status = status_res.data?.payload;
+    if (status?.report_required && !status?.report_submitted) {
+      const gate_err = toIpcSafeError({
+        response: { data: { message: 'Daily Report required before checkout. Please submit your Daily Report to continue.', code: 'REPORT_REQUIRED' } },
+      });
+      gate_err.is_report_gate = true;
+      throw gate_err;
     }
+  } catch (err) {
+    if (err.is_report_gate) throw err; // already IPC-safe (built via toIpcSafeError above) — re-throw as-is
+    // Any other failure (network, endpoint down) — don't block checkout
+    // over a compliance check that couldn't even run; the real POST
+    // /timesheet/clock-out call below still enforces this authoritatively.
   }
 
   stopScreenshots();
@@ -752,6 +764,14 @@ ipcMain.handle('break-end', async () => {
 
 ipcMain.handle('open-dashboard', () => {
   shell.openExternal(DASHBOARD_URL);
+});
+
+// Reuses the existing web Daily Report page (fe-work's /employee/daily-report,
+// the only place a report can actually be submitted — see
+// timesheets.controller.js's compliance_status comment) rather than building
+// a second, duplicate report form inside this app.
+ipcMain.handle('open-daily-report', () => {
+  shell.openExternal(`${DASHBOARD_URL}/daily-report`);
 });
 
 // ── Desktop update IPC ───────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('agent', {
   breakStart:    ()               => ipcRenderer.invoke('break-start'),
   breakEnd:      ()               => ipcRenderer.invoke('break-end'),
   openDashboard: ()               => ipcRenderer.invoke('open-dashboard'),
+  openDailyReport: ()              => ipcRenderer.invoke('open-daily-report'),
   minimizeWindow: ()              => ipcRenderer.invoke('minimize-window'),
   closeWindow:   ()               => ipcRenderer.invoke('close-window'),
   onScreenshot:  (cb)             => ipcRenderer.on('screenshot-taken', cb),
