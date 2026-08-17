@@ -387,6 +387,20 @@
   <div class="update-card" id="report-required-card"></div>
 </div>
 
+<!-- Idle-triggered break notice — same reused backdrop/card classes, own id.
+     Shown when a resync (refreshToday) finds status ON_BREAK with
+     break_source IDLE (see summarize_today_entries in be-work), i.e. the
+     scheduler's auto-checkout job put this session on break because no
+     desktop activity was seen, not because the employee started a manual
+     break. Resume Work is the ONLY way out — clicking it calls the existing
+     break-end IPC (window.agent.breakEnd()), the same one manual breaks use.
+     Detecting fresh local mouse/keyboard activity never auto-dismisses this;
+     only an explicit click does (see maybeShowIdleBreakModal/resumeFromIdleBreak
+     in renderer.js). -->
+<div class="update-backdrop" id="idle-break-backdrop">
+  <div class="update-card" id="idle-break-card"></div>
+</div>
+
 
 <script src="renderer.js"></script>
 </body>

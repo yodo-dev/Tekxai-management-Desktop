@@ -11,6 +11,12 @@ let priorSeconds = 0;
 let tickInterval = null;
 let screenshotCount = 0;
 let onBreak = false;
+// 'IDLE' | 'MANUAL' | null — which flow put the current session ON_BREAK
+// (see break_source in be-work's summarize_today_entries). Only an IDLE
+// break shows the "placed on break due to inactivity — Resume Work?"
+// modal below; a MANUAL break keeps using the existing inline Resume
+// button in the tracker actions row (setTrackerUI), unchanged.
+let breakSource = null;
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
@@ -177,9 +183,12 @@ async function refreshToday() {
       priorSeconds = data.entry.prior_seconds || 0;
       clockedIn = true; clockedOut = false;
       onBreak = data.entry.status === 'ON_BREAK';
+      breakSource = onBreak ? (data.entry.break_source || null) : null;
       setTrackerUI('active');
       startTick();
       setSsIndicator(!onBreak);
+      if (onBreak && breakSource === 'IDLE') maybeShowIdleBreakModal();
+      else hideIdleBreakModal();
 
       const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       document.getElementById('stat-checkin').textContent = checkinTime;
@@ -189,6 +198,8 @@ async function refreshToday() {
     } else if (data.clocked_in && data.clocked_out) {
       clockedIn = false; clockedOut = true;
       priorSeconds = 0;
+      breakSource = null;
+      hideIdleBreakModal();
       // A tickInterval from a previously-active session (restored earlier by
       // the branch above) may still be running — e.g. the backend's own
       // auto-checkout job closed this session before we found out, so we
@@ -213,6 +224,8 @@ async function refreshToday() {
       // way there's nothing active to show.
       clockedIn = false; clockedOut = false;
       priorSeconds = 0;
+      breakSource = null;
+      hideIdleBreakModal();
       stopTick();
       setSsIndicator(false);
       setTrackerUI('idle');
@@ -251,6 +264,7 @@ async function doClock(action) {
       priorSeconds = entry.prior_seconds || 0;
       clockedIn = true; clockedOut = false;
       onBreak = false;
+      breakSource = null;
       screenshotCount = 0;
       setTrackerUI('active');
       startTick();
@@ -304,10 +318,12 @@ async function doBreak() {
       actRow.querySelector('#btn-break')?.setAttribute('disabled', 'true');
       await window.agent.breakStart();
       onBreak = true;
+      breakSource = 'MANUAL';
     } else {
       actRow.querySelector('#btn-break')?.setAttribute('disabled', 'true');
       await window.agent.breakEnd();
       onBreak = false;
+      breakSource = null;
     }
     setTrackerUI('active');
   } catch (e) {
@@ -578,6 +594,59 @@ async function retryCheckoutAfterReport() {
     if (e?.code !== 'REPORT_REQUIRED' && !/Daily Report required/i.test(e?.message || '')) {
       alert(e?.message || 'Checkout failed. Please try again.');
     }
+  }
+}
+
+// ── Idle-triggered break notice ─────────────────────────────────────────────
+// Shown only when the backend's own resync (refreshToday) reports
+// status ON_BREAK with break_source IDLE — i.e. the scheduler's
+// auto-checkout job (be-work auto-checkout.job.js) put this session on
+// break because no desktop activity was seen for the configured Idle
+// Timeout Duration. That job never auto-resumes an IDLE break on its own
+// (see the corresponding backend fix) — only this explicit "Resume Work"
+// click, which reuses the existing break-end IPC, ends it. Detecting local
+// mouse/keyboard activity again must NOT auto-dismiss this on its own.
+function maybeShowIdleBreakModal() {
+  const backdrop = document.getElementById('idle-break-backdrop');
+  if (backdrop.classList.contains('active')) return; // already showing
+  document.getElementById('idle-break-card').innerHTML = `
+    <div class="update-icon force">💤</div>
+    <div>
+      <div class="update-title">You Were Placed On Break</div>
+      <div class="update-subtitle force">You were automatically placed on break due to inactivity. Would you like to resume work?</div>
+    </div>
+    <div class="update-actions">
+      <button class="btn btn-primary" onclick="resumeFromIdleBreak()">▶ Resume Work</button>
+    </div>
+  `;
+  backdrop.classList.add('active');
+}
+function hideIdleBreakModal() {
+  document.getElementById('idle-break-backdrop').classList.remove('active');
+}
+async function resumeFromIdleBreak() {
+  const btn = document.querySelector('#idle-break-card .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Resuming…'; }
+  try {
+    // Same break-end IPC a manual break's "Resume" button already uses —
+    // no parallel resume path, no duplicate break/resume transition.
+    await window.agent.breakEnd();
+    onBreak = false;
+    breakSource = null;
+    hideIdleBreakModal();
+    setTrackerUI('active');
+    setSsIndicator(true);
+    // Resync from the backend rather than trusting this optimistic local
+    // update as final — matches the same pattern doBreak() already uses.
+    await refreshToday();
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Resume Work'; }
+    const rawMsg = e?.response?.data?.message || e?.message || 'Action failed';
+    const msg = /no active clock-in/i.test(rawMsg)
+      ? 'Your session was already ended automatically (e.g. at end of shift). You are now shown as clocked out.'
+      : rawMsg;
+    alert(msg);
+    await refreshToday();
   }
 }
 
