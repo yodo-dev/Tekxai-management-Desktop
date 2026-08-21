@@ -9,9 +9,9 @@
   },
   "scripts": {
     "start": "electron .",
-    "build:win": "electron-builder --win --config electron-builder.config.js",
-    "build:mac": "electron-builder --mac --config electron-builder.config.js && node scripts/sync-update-yml.js",
-    "build:linux": "electron-builder --linux --config electron-builder.config.js"
+    "build:win": "electron-builder --win --config electron-builder.config.js && node scripts/generate-metadata.js",
+    "build:mac": "electron-builder --mac --config electron-builder.config.js && node scripts/sync-update-yml.js && node scripts/generate-metadata.js",
+    "build:linux": "electron-builder --linux --config electron-builder.config.js && node scripts/generate-metadata.js"
   },
   "dependencies": {
     "active-win": "^8.1.1",
