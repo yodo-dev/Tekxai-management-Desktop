@@ -109,5 +109,13 @@ module.exports = {
   nsis: {
     oneClick: false,
     allowToChangeInstallationDirectory: true,
+    // Custom NSIS include (see build/installer.nsh) that detects a running
+    // "TEKxAI Agent.exe" and closes it (gracefully, then forcibly if
+    // needed) before install proceeds. This replaces the invalid
+    // closeApplication/restartApplication keys attempted in 9c4fc68 and
+    // reverted in 0320daf — those are not real electron-builder NSIS
+    // options at any version, including current latest. `include` is
+    // electron-builder's actual supported mechanism for this.
+    include: 'build/installer.nsh',
   },
 };
