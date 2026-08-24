@@ -8,7 +8,16 @@ let startEpoch = 0;
 // per-day, not per check-in — the ticker below adds this to the running
 // session's elapsed time instead of starting from zero on every clock-in.
 let priorSeconds = 0;
-let tickInterval = null;
+// `var` (not `let`) deliberately: these two are asserted on directly by the
+// interval-leak regression test (tests/renderer.reconcile.test.js), which
+// loads this file via Node's vm module — only top-level `var`/function
+// declarations attach to that sandbox's global object and are reachable
+// from outside the script; `let`/`const` would be invisible to the test.
+// No behavior change vs. `let` here (both are still just module-top-level
+// state used the same way everywhere below).
+var tickInterval = null;
+// Backstop reconciliation while clocked in — see startTick()/stopTick() below.
+var reconcileInterval = null;
 let screenshotCount = 0;
 let onBreak = false;
 // 'IDLE' | 'MANUAL' | null — which flow put the current session ON_BREAK
@@ -41,7 +50,11 @@ let breakSource = null;
   // dashboard up against a session that no longer exists.
   window.agent.onSessionExpired(() => {
     clockedIn = false; clockedOut = false; priorSeconds = 0;
-    if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
+    // stopTick() (not just clearing tickInterval) so the periodic
+    // backstop reconciliation interval added below is also torn down —
+    // otherwise it would keep calling refreshToday() against a session
+    // the main process already knows is gone.
+    stopTick();
     showLogin('Your session expired. Please sign in again.');
   });
 
@@ -287,6 +300,15 @@ async function doClock(action) {
       if (e?.code === 'REPORT_REQUIRED' || /Daily Report required/i.test(rawMsg)) {
         setTrackerUI('active');
         showReportRequiredModal();
+        // Clock-out was rejected, not applied — but the local ticker has
+        // been running (and any prior force-close/desync could have already
+        // happened) while this request was in flight. Every other failure
+        // branch below already resyncs from the backend; this one didn't,
+        // which let the displayed timer keep drifting on stale local state
+        // even though nothing here is actually still accurate. Resync here
+        // too so the report-required modal sits on top of a correct
+        // checked-in time/status, not a frozen one.
+        await refreshToday();
         return;
       }
       // Don't trust the pre-click local state here — a failed clock-out
@@ -398,10 +420,26 @@ function startTick() {
     document.getElementById('tracker-time').textContent = fmtHms(elapsed);
     document.getElementById('stat-today').textContent   = fmtDuration(elapsed);
   }, 1000);
+
+  // Backstop reconciliation: every user-triggered action that can fail
+  // already resyncs from the backend on its own error path (see doClock,
+  // doBreak, retryCheckoutAfterReport), but if the employee just sits idle
+  // with a session open, NOTHING pulls fresh state until they next click
+  // something — a server-side force-close (shift-end auto-checkout, admin
+  // action) could sit unnoticed indefinitely, with this ticker happily
+  // counting forward on a startEpoch the backend no longer honors. This is
+  // exactly the "no error, no click, no resync" gap the original 21h/2h
+  // desync bug lived in. A low-frequency periodic refreshToday() while
+  // clocked in closes that gap without adding meaningful load: one request
+  // every 5 minutes per connected employee is negligible, and refreshToday()
+  // already no-ops safely on transient failures (see its catch).
+  if (reconcileInterval) clearInterval(reconcileInterval);
+  reconcileInterval = setInterval(() => { refreshToday(); }, 5 * 60 * 1000);
 }
 
 function stopTick() {
   if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
+  if (reconcileInterval) { clearInterval(reconcileInterval); reconcileInterval = null; }
 }
 
 // ── Formatters ────────────────────────────────────────────────────────────────
@@ -594,6 +632,13 @@ async function retryCheckoutAfterReport() {
     if (e?.code !== 'REPORT_REQUIRED' && !/Daily Report required/i.test(e?.message || '')) {
       alert(e?.message || 'Checkout failed. Please try again.');
     }
+    // Same gap as the initial REPORT_REQUIRED branch in doClock(): this retry
+    // failed too, but nothing here was resyncing the displayed timer/status
+    // with the backend, so the local ticker just kept counting on a stale
+    // startEpoch. Resync unconditionally so whatever is actually true on the
+    // backend (still open, or already force-closed in the meantime) is what
+    // gets shown while the employee is stuck on this modal.
+    await refreshToday();
   }
 }
 
