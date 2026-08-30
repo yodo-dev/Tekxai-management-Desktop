@@ -17,7 +17,12 @@ Release notes for the Desktop Release API's `release_notes` field (rendered via 
 
 ## Fixes
 - Fixed a macOS single-architecture build crash; added proper multi-arch Linux (x64/arm64) support
-- Fixed the installer being unable to close a running instance during an upgrade (single-instance lock)
+- **Correction (added retroactively):** this entry originally claimed the Windows installer's "unable to close a running instance during an upgrade" problem was fixed here via `nsis.closeApplication`/`restartApplication`. That was inaccurate — those config keys are not valid electron-builder NSIS options at any version, the change was reverted the same day (commit `0320daf`, ~30 minutes after `9c4fc68`), and the underlying issue ("Another program is currently using this file." when double-clicking the installer while the app is running) remained unresolved through 1.2.1 and 1.2.2. The single-instance lock added alongside it is a real, unrelated fix (prevents a second running copy) and was not reverted. The actual installer fix ships in 1.2.3, below.
 
 ## Under the hood
 - `electron-updater` auto-update mechanics unchanged (still generic-provider, still backend-decision-driven); this release is the first to have a live, reachable artifact host (`releases.tekxai.services`) behind it
+
+# TEKxAI Agent 1.2.3
+
+## Fixes
+- **Windows installer no longer fails with "Another program is currently using this file."** when launched while TEKxAI Agent is already running. The NSIS installer now detects a running `TEKxAI Agent.exe` before installing, asks it to close gracefully, and force-terminates it only if it hasn't exited after a short wait — implemented via a custom NSIS include (`build/installer.nsh`, wired in through `nsis.include`), since electron-builder has no built-in `closeApplication`/`restartApplication` NSIS option at any version (see the corrected 1.2.0 note above for how that was previously misreported as fixed).
