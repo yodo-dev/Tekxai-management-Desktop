@@ -78,7 +78,7 @@ module.exports = {
     url: 'https://releases.tekxai.services/desktop-app',
   },
   win: {
-    target: 'nsis',
+    target: [{ target: 'nsis', arch: ['x64'] }],
     icon: 'assets/icon.ico',
     ...resolveWinSigning(),
   },
