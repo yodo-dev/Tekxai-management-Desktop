@@ -1,5 +1,15 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 
+// Attendance is a company-wide policy (shift start/grace-period/lateness are
+// all computed server-side against Asia/Karachi — see be-work's
+// timesheets.service.js DISPLAY_TIMEZONE and attendance.repository.js's
+// compute_violation()), so the displayed check-in clock must show that same
+// company timezone — never the laptop's own OS timezone, which is what
+// toLocaleTimeString() falls back to when no `timeZone` is given. A laptop
+// set to the wrong timezone previously showed a check-in time that didn't
+// match Asia/Karachi wall-clock time at all (confirmed in production).
+const COMPANY_TIMEZONE = 'Asia/Karachi';
+
 let clockedIn = false;
 let clockedOut = false;
 let startEpoch = 0;
@@ -203,7 +213,7 @@ async function refreshToday() {
       if (onBreak && breakSource === 'IDLE') maybeShowIdleBreakModal();
       else hideIdleBreakModal();
 
-      const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: COMPANY_TIMEZONE });
       document.getElementById('stat-checkin').textContent = checkinTime;
       // Math.max(0, ...) guards against a skewed/behind local clock (see startTick).
       const elapsedNow = Math.max(0, Math.floor((Date.now() - startEpoch) / 1000));
@@ -229,7 +239,7 @@ async function refreshToday() {
       const dur = data.entry.duration_seconds || 0;
       document.getElementById('tracker-time').textContent = fmtHms(dur);
       document.getElementById('stat-today').textContent = fmtDuration(dur);
-      const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: COMPANY_TIMEZONE });
       document.getElementById('stat-checkin').textContent = checkinTime;
     } else {
       // Never clocked in today, or the backend already force-closed the
@@ -282,7 +292,7 @@ async function doClock(action) {
       setTrackerUI('active');
       startTick();
       setSsIndicator(true);
-      const checkinTime = new Date(startEpoch).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const checkinTime = new Date(startEpoch).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: COMPANY_TIMEZONE });
       document.getElementById('stat-checkin').textContent = checkinTime;
     } else {
       actRow.innerHTML = '<button class="btn btn-outline" disabled>Clocking out…</button>';
