@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, systemPreferences, safeStorage } = require('electron');
 const path = require('path');
 const os = require('os');
 const Store = require('electron-store');
@@ -20,6 +20,54 @@ if (!gotSingleInstanceLock) {
 }
 
 const store = new Store();
+
+// Persistent-session hardening — auth_token/refresh_token are the two values
+// that (per Phase 5 of the persistent-session requirement) must never sit on
+// disk as a plain readable string. electron-store itself just writes JSON
+// to a file in userData, so we encrypt these two values with Electron's
+// safeStorage before handing them to it — on macOS that's the Keychain, on
+// Windows DPAPI (tied to the OS user account), on Linux the system keyring
+// (libsecret) when available. Nothing else in `store` changes: `user` is
+// non-secret profile display data (no password, ever), and everything else
+// (clocked_in, pending_update_version, etc.) was never sensitive.
+//
+// Falls back to storing the raw value if safeStorage isn't available on
+// this OS/session (e.g. some headless Linux without a keyring) — a session
+// that still works without hardened-at-rest storage beats one that can't
+// log in at all. get_token() transparently reads either shape so upgrading
+// from the previous plaintext electron-store format doesn't log anyone out.
+const TOKEN_KEYS = new Set(['auth_token', 'refresh_token']);
+function set_token(key, value) {
+  if (!TOKEN_KEYS.has(key)) throw new Error(`set_token: not a token key: ${key}`);
+  if (value == null) { store.delete(key); return; }
+  if (safeStorage.isEncryptionAvailable()) {
+    store.set(key, { enc: safeStorage.encryptString(String(value)).toString('base64') });
+  } else {
+    store.set(key, { plain: String(value) });
+  }
+}
+function get_token(key) {
+  if (!TOKEN_KEYS.has(key)) throw new Error(`get_token: not a token key: ${key}`);
+  const raw = store.get(key);
+  if (raw == null) return undefined;
+  // Pre-hardening installs may still have the bare string from before this
+  // change shipped — read it once, then it gets re-saved in the new
+  // encrypted shape the next time set_token() runs for that key (login or
+  // refresh), so it self-migrates rather than needing a one-off migration.
+  if (typeof raw === 'string') return raw;
+  if (raw.plain !== undefined) return raw.plain;
+  if (raw.enc !== undefined) {
+    if (!safeStorage.isEncryptionAvailable()) return undefined; // can't decrypt — treat as logged out, never as a plaintext fallback
+    try { return safeStorage.decryptString(Buffer.from(raw.enc, 'base64')); }
+    catch { return undefined; } // e.g. decrypted on a different OS user/machine — never trust it
+  }
+  return undefined;
+}
+function delete_token(key) {
+  if (!TOKEN_KEYS.has(key)) throw new Error(`delete_token: not a token key: ${key}`);
+  store.delete(key);
+}
+
 const API_BASE = 'https://api.tekxai.services/api/v1';
 const DASHBOARD_URL = 'https://tekxai.services/employee';
 const SCREENSHOT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -57,7 +105,7 @@ function toIpcSafeError(err) {
 // wrapped in authRequest() below, which retries once via POST /auth/refresh
 // on a 401 before giving up.
 async function performTokenRefresh() {
-  const refresh_token = store.get('refresh_token');
+  const refresh_token = get_token('refresh_token');
   if (!refresh_token) throw new Error('No refresh token available');
 
   const axios = require('axios');
@@ -70,8 +118,8 @@ async function performTokenRefresh() {
   const newRefreshToken = payload?.refreshToken || payload?.refresh_token;
   if (!newAccessToken) throw new Error('Refresh response missing access token');
 
-  store.set('auth_token', newAccessToken);
-  if (newRefreshToken) store.set('refresh_token', newRefreshToken);
+  set_token('auth_token', newAccessToken);
+  if (newRefreshToken) set_token('refresh_token', newRefreshToken);
   return newAccessToken;
 }
 
@@ -81,7 +129,7 @@ async function performTokenRefresh() {
 // fall back to the login screen, rather than leaving a "logged in" UI up
 // against a session that no longer exists.
 async function authRequest(requestFn) {
-  const token = store.get('auth_token');
+  const token = get_token('auth_token');
   try {
     return await requestFn(token);
   } catch (err) {
@@ -90,8 +138,8 @@ async function authRequest(requestFn) {
     try {
       refreshedToken = await performTokenRefresh();
     } catch (_) {
-      store.delete('auth_token');
-      store.delete('refresh_token');
+      delete_token('auth_token');
+      delete_token('refresh_token');
       store.delete('user');
       mainWindow?.webContents.send('session-expired');
       throw err; // surface the original 401, not the refresh failure
@@ -226,7 +274,7 @@ async function checkBackendVersion() {
 // authenticated channel this app has, so an admin's per-employee "Force
 // Update" (independent of the release-wide mandatory flag) surfaces here.
 async function reportTelemetry() {
-  const token = store.get('auth_token');
+  const token = get_token('auth_token');
   if (!token) return;
   const axios = require('axios');
   try {
@@ -255,7 +303,7 @@ async function reportUpdateSuccessIfPending() {
   const pendingVersion = store.get('pending_update_version');
   if (!pendingVersion || pendingVersion !== app.getVersion()) return;
   store.delete('pending_update_version');
-  const token = store.get('auth_token');
+  const token = get_token('auth_token');
   if (!token) return;
   const axios = require('axios');
   try {
@@ -276,7 +324,7 @@ async function reportUpdateFailure(errorMessage) {
   if (!updateAttempt) return;
   const { fromVersion, toVersion } = updateAttempt;
   updateAttempt = null;
-  const token = store.get('auth_token');
+  const token = get_token('auth_token');
   if (!token) return;
   const axios = require('axios');
   try {
@@ -395,7 +443,7 @@ ipcMain.handle = (channel, listener) => rawIpcHandle(channel, (...args) => {
 });
 
 async function reportCrash(stack_trace) {
-  const token = store.get('auth_token');
+  const token = get_token('auth_token');
   if (!token) return; // matches this app's existing telemetry limitation — no unauthenticated channel to report through
   const axios = require('axios');
   try {
@@ -447,7 +495,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', async () => {
   stopScreenshots();
   if (sessionId) {
-    const token = store.get('auth_token');
+    const token = get_token('auth_token');
     if (token) {
       try {
         const axios = require('axios');
@@ -525,23 +573,39 @@ ipcMain.handle('login', async (_, { email, password }) => {
   const refreshToken = payload.refreshToken || payload.refresh_token;
   const user = payload.user;
   if (!token) throw new Error('Login response did not include an access token.');
-  store.set('auth_token', token);
-  if (refreshToken) store.set('refresh_token', refreshToken);
+  set_token('auth_token', token);
+  if (refreshToken) set_token('refresh_token', refreshToken);
   store.set('user', user || payload);
   return { user: user || payload };
 });
 
 ipcMain.handle('logout', async () => {
   stopScreenshots();
-  store.delete('auth_token');
-  store.delete('refresh_token');
+  // A real logout, not just a local sign-out — revoke the refresh token
+  // server-side (POST /auth/logout) BEFORE clearing it locally, so a copy
+  // of it can't still authenticate a session refresh from anywhere else
+  // once this device says "logged out". Best-effort: if the backend is
+  // unreachable, still clear everything locally — a stranded server-side
+  // session is a smaller problem than a device that claims to be logged
+  // out but silently isn't.
+  const refresh_token = get_token('refresh_token');
+  if (refresh_token) {
+    try {
+      const axios = require('axios');
+      await axios.post(`${API_BASE}/auth/logout`, { refresh_token });
+    } catch (err) {
+      console.error('[logout] server-side session revoke failed (clearing local session anyway):', err.message);
+    }
+  }
+  delete_token('auth_token');
+  delete_token('refresh_token');
   store.delete('user');
   store.set('clocked_in', false);
   sessionId = null;
 });
 
 ipcMain.handle('get-today', async () => {
-  if (!store.get('auth_token')) return null;
+  if (!get_token('auth_token')) return null;
   const axios = require('axios');
   try {
     const res = await authRequest((token) => axios.get(`${API_BASE}/timesheet/today`, {
@@ -578,7 +642,7 @@ ipcMain.handle('get-today', async () => {
     // startScreenshots/startAppUsage and stopScreenshots already start by
     // clearing their own timers, so calling them redundantly here is safe.
     if (payload?.clocked_in && !payload?.clocked_out) {
-      const currentToken = store.get('auth_token');
+      const currentToken = get_token('auth_token');
       if (payload.entry?.status === 'ON_BREAK') {
         stopScreenshots();
       } else {
@@ -596,6 +660,32 @@ ipcMain.handle('get-today', async () => {
 });
 
 ipcMain.handle('clock-in', async () => {
+  // Monitoring permission gate — MUST run before any attendance API call.
+  // GRANTED and NOT_APPLICABLE (this platform has no such gate) proceed;
+  // DENIED and UNKNOWN both block, fail-closed, with zero calls to
+  // /timesheet/clock-in — no partial attendance record is ever created on
+  // this path, nothing to roll back. The renderer's blocking permission
+  // modal is what the thrown error here drives.
+  let permission_status;
+  try {
+    permission_status = getMonitoringPermissionStatus();
+  } catch (err) {
+    console.error('[clock-in] permission check threw', err.message);
+    // Local error, never sent to the backend — toIpcSafeError only ever
+    // reads err.response.data.code (a backend-originated code), so a
+    // plain local Error's own .code wouldn't survive it. Build the
+    // ipc-safe error directly instead.
+    const e = new Error('Unable to verify screen monitoring permission. Please check Screen Recording permission in System Settings and try again.');
+    e.code = 'MONITORING_PERMISSION_UNVERIFIED';
+    throw e;
+  }
+  reportMonitoringPermissionStatus(permission_status).catch(() => {});
+  if (permission_status === 'DENIED' || permission_status === 'UNKNOWN') {
+    const e = new Error('Screen Recording permission is required before you can clock in.');
+    e.code = 'MONITORING_PERMISSION_DENIED';
+    throw e;
+  }
+
   const axios = require('axios');
 
   // Start monitoring session
@@ -650,7 +740,7 @@ ipcMain.handle('clock-in', async () => {
   // Re-read from store rather than reusing a captured variable — authRequest()
   // above may have refreshed the access token mid-call, and the timers below
   // need the current one, not whatever was valid when clock-in started.
-  const currentToken = store.get('auth_token');
+  const currentToken = get_token('auth_token');
   startScreenshots(currentToken);
   startAppUsage(currentToken);
   return entry;
@@ -753,7 +843,7 @@ ipcMain.handle('break-end', async () => {
     const res = await authRequest((token) => axios.post(`${API_BASE}/timesheet/break/end`, {}, {
       headers: { Authorization: `Bearer ${token}` },
     }));
-    const currentToken = store.get('auth_token');
+    const currentToken = get_token('auth_token');
     startScreenshots(currentToken);
     startAppUsage(currentToken);
     return res.data.payload;
@@ -801,6 +891,83 @@ ipcMain.handle('desktop-update:start-download', async () => {
 ipcMain.handle('desktop-update:restart-and-install', () => {
   autoUpdater.quitAndInstall();
 });
+
+// ── Monitoring permission gate ─────────────────────────────────────────────────
+// Screenshot capture (below) depends on the OS actually letting this app
+// capture the screen — on macOS that's the Screen Recording TCC permission.
+// Before this feature, clock-in never checked for it at all: an employee
+// with the permission denied could still clock in, the attendance timer
+// would run, and takeScreenshot() would fail silently (caught, logged to
+// the employee's own console only, never reaching the backend) — the exact
+// "No screenshots found" gap this closes. This is a PRE-CLOCK-IN readiness
+// gate only; nothing here touches attendance/idle/break/overtime
+// calculation once a session is actually open.
+//
+// Controlled states, fail-closed on anything ambiguous:
+//   GRANTED        — capture is expected to work
+//   DENIED         — capture will not work; block clock-in
+//   UNKNOWN        — macOS hasn't given a clear answer yet; treated as
+//                     DENIED for clock-in purposes (never fail open)
+//   NOT_APPLICABLE — this platform's screenshot implementation has no
+//                     equivalent OS permission gate (Windows GDI capture,
+//                     and Linux/X11 today — Wayland's portal-based capture
+//                     is a real future gap, not something this function
+//                     pretends to already handle)
+function getMonitoringPermissionStatus() {
+  if (process.platform !== 'darwin') {
+    // Windows: screenshot-desktop's GDI-based capture has no OS permission
+    // prompt to check. Linux: same, for the X11 case this app currently
+    // supports — screenshot-desktop does not do Wayland-portal capture, so
+    // inventing a Wayland-specific permission check here would just be
+    // fiction. Documented gap, not a fake gate.
+    return 'NOT_APPLICABLE';
+  }
+  try {
+    const status = systemPreferences.getMediaAccessStatus('screen');
+    if (status === 'granted') return 'GRANTED';
+    if (status === 'denied' || status === 'restricted') return 'DENIED';
+    // 'not-determined', or any future value Electron adds — fail closed,
+    // never assume permission exists just because the OS hasn't said no.
+    return 'UNKNOWN';
+  } catch (err) {
+    console.error('[monitoring-permission] status check failed', err.message);
+    return 'UNKNOWN';
+  }
+}
+
+// macOS only — there is no equivalent deep-link for Windows/Linux since
+// NOT_APPLICABLE never reaches this. Opens System Settings' Screen
+// Recording pane directly; does not and cannot grant the permission
+// itself — only the employee, in that pane, can do that.
+function openMonitoringPermissionSettings() {
+  if (process.platform !== 'darwin') return;
+  shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+}
+
+ipcMain.handle('monitoring-permission:check', () => getMonitoringPermissionStatus());
+ipcMain.handle('monitoring-permission:open-settings', () => { openMonitoringPermissionSettings(); });
+
+// Best-effort — records this install's last-known permission state on the
+// existing desktop_installations row (same telemetry table reportTelemetry
+// already writes to) so Administration can see who's blocked without
+// needing a second telemetry mechanism. Never blocks/throws into the
+// clock-in flow if the backend call fails; the actual gate is enforced
+// locally above, this is purely the defense-in-depth signal.
+async function reportMonitoringPermissionStatus(status) {
+  const token = get_token('auth_token');
+  if (!token) return;
+  const axios = require('axios');
+  try {
+    await authRequest((t) => axios.post(`${API_BASE}/desktop/telemetry`, {
+      current_version: app.getVersion(),
+      os: osLabel(),
+      platform: process.platform,
+      device: os.hostname(),
+      channel: UPDATE_CHANNEL,
+      monitoring_permission_status: status,
+    }, { headers: { Authorization: `Bearer ${t}` } }));
+  } catch (_) {}
+}
 
 // ── Screenshot capture ────────────────────────────────────────────────────────
 
