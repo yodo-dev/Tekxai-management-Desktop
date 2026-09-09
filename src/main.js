@@ -145,11 +145,31 @@ async function authRequest(requestFn) {
     let refreshedToken;
     try {
       refreshedToken = await performTokenRefresh();
-    } catch (_) {
-      delete_token('auth_token');
-      delete_token('refresh_token');
-      store.delete('user');
-      mainWindow?.webContents.send('session-expired');
+    } catch (refreshErr) {
+      // Regression fix — this used to wipe the session on ANY refresh
+      // failure, with no distinction between "the refresh token is
+      // genuinely invalid" and "the refresh request itself failed for an
+      // unrelated, transient reason" (429 rate-limited, 5xx, network
+      // timeout/offline). Confirmed cause of a real incident: a burst of
+      // 429s from the duplicate-login-request bug (fixed separately) could
+      // still be in the same rate-limit window when this boot-time refresh
+      // ran, so a perfectly valid session got wiped and "Your session
+      // expired" shown even though the refresh token was fine. Only a
+      // genuine auth rejection from the refresh endpoint itself (401/403 —
+      // the token really is invalid/expired/revoked) means the session is
+      // actually over; every other failure is preserved as transient and
+      // simply surfaces the original error, leaving the stored session
+      // intact so the next attempt (retry, or the next authenticated call)
+      // can succeed normally.
+      const refresh_status = refreshErr?.response?.status;
+      if (refresh_status === 401 || refresh_status === 403) {
+        delete_token('auth_token');
+        delete_token('refresh_token');
+        store.delete('user');
+        mainWindow?.webContents.send('session-expired');
+      } else {
+        console.error('[auth] token refresh failed transiently (session preserved):', refreshErr?.message);
+      }
       throw err; // surface the original 401, not the refresh failure
     }
     return await requestFn(refreshedToken);
