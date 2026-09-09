@@ -81,9 +81,20 @@ let breakSource = null;
 // ── Login ─────────────────────────────────────────────────────────────────────
 
 async function doLogin() {
+  const btn = document.getElementById('login-btn');
+  // Re-entrancy guard — doLogin() has two independent trigger paths (the
+  // button's own onclick, and the document-level Enter keydown listener
+  // below). If focus is ever on the Sign In button itself, pressing Enter
+  // fires BOTH: the browser's native synthetic click on the focused button
+  // AND this keydown listener, invoking doLogin() twice in the same tick —
+  // before either call's `btn.disabled = true` has taken effect against the
+  // other. That produced two simultaneous /auth/login requests from one
+  // keypress. Checking disabled state first, before doing anything else,
+  // makes the second (re-entrant) call a no-op.
+  if (btn.disabled) return;
+
   const email    = document.getElementById('email').value.trim();
   const password = document.getElementById('password').value;
-  const btn      = document.getElementById('login-btn');
   const errEl    = document.getElementById('login-error');
 
   errEl.textContent = '';
@@ -97,11 +108,28 @@ async function doLogin() {
     showDashboard(user);
     await refreshToday();
   } catch (e) {
-    errEl.textContent = e?.response?.data?.message || e?.message || 'Login failed.';
+    errEl.textContent = loginErrorMessage(e);
   } finally {
     btn.disabled = false;
     btn.textContent = 'Sign In';
   }
+}
+
+// Surfaces a plain, actionable message instead of the raw Electron IPC error
+// text (e.g. "Error invoking remote method 'login': Error: Request failed
+// with status code 429"), which is meaningless to a user. e.response never
+// survives the main-process IPC boundary — main.js's toIpcSafeError() lifts
+// status/retryAfter onto the Error's own properties for exactly this reason;
+// read those directly here, not e.response.
+function loginErrorMessage(e) {
+  if (e?.status === 429) {
+    const retryAfter = Number(e?.retryAfter);
+    const wait = Number.isFinite(retryAfter) && retryAfter > 0
+      ? ` Please try again in about ${Math.ceil(retryAfter / 60) || 1} minute(s).`
+      : ' Please wait a moment and try again.';
+    return `Too many login attempts.${wait}`;
+  }
+  return e?.message || 'Login failed.';
 }
 
 function togglePasswordVisibility() {
@@ -334,6 +362,13 @@ async function doClock(action) {
         ? 'Your session was already ended automatically (e.g. at end of shift). You are now shown as clocked out.'
         : rawMsg;
       alert(msg);
+    } else if (e?.code === 'MONITORING_PERMISSION_DENIED' || e?.code === 'MONITORING_PERMISSION_UNVERIFIED') {
+      // Blocked locally, before any attendance API call — clockedIn/
+      // clockedOut/the ticker were never touched, so 'idle' is correct
+      // here (not clockedIn ? 'active' : 'idle' — clock-in genuinely never
+      // happened on this attempt).
+      setTrackerUI('idle');
+      showMonitoringPermissionModal(e.code === 'MONITORING_PERMISSION_UNVERIFIED');
     } else {
       setTrackerUI(clockedIn ? 'active' : 'idle');
       alert(e?.response?.data?.message || e?.message || 'Action failed');
@@ -627,6 +662,58 @@ function showReportRequiredModal() {
 }
 function hideReportRequiredModal() {
   document.getElementById('report-required-backdrop').classList.remove('active');
+}
+
+// Monitoring permission gate — mirrors showReportRequiredModal's shape
+// exactly: no dismiss/bypass path, only "Open System Settings" (macOS
+// can't grant this itself — only the employee can, in that pane) and
+// "Check Permission Again" (re-runs the exact same local check main.js's
+// clock-in gate uses, then retries clockIn() for real — never assumes
+// success locally). `unverified` distinguishes the rare "the OS API check
+// itself threw" case from a plain DENIED/UNKNOWN read, per the
+// fail-closed requirement — both block identically, only the copy differs.
+function showMonitoringPermissionModal(unverified) {
+  const subtitle = unverified
+    ? 'Unable to verify screen monitoring permission. Please check Screen Recording permission in System Settings and try again.'
+    : 'Your monitoring permission is currently disabled. To clock in, please enable the required Screen Recording permission for TEKxAI Agent.';
+  document.getElementById('monitoring-permission-card').innerHTML = `
+    <div class="update-icon force">🔒</div>
+    <div>
+      <div class="update-title">Screen Monitoring Permission Required</div>
+      <div class="update-subtitle force">${subtitle}</div>
+    </div>
+    <div id="monitoring-permission-status" class="update-subtitle" style="margin-top:4px"></div>
+    <div class="update-actions">
+      <button class="btn btn-outline" onclick="window.agent.openMonitoringPermissionSettings()">Open System Settings</button>
+      <button class="btn btn-primary" onclick="recheckMonitoringPermission()">Check Permission Again</button>
+    </div>
+  `;
+  document.getElementById('monitoring-permission-backdrop').classList.add('active');
+}
+function hideMonitoringPermissionModal() {
+  document.getElementById('monitoring-permission-backdrop').classList.remove('active');
+}
+async function recheckMonitoringPermission() {
+  const btn = document.querySelector('#monitoring-permission-card .btn-primary');
+  const statusEl = document.getElementById('monitoring-permission-status');
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const status = await window.agent.checkMonitoringPermission();
+    if (status === 'GRANTED' || status === 'NOT_APPLICABLE') {
+      if (statusEl) statusEl.textContent = 'Permission verified. You can now clock in.';
+      hideMonitoringPermissionModal();
+      // Re-run the real clock-in — this modal never assumes success on its
+      // own; POST /timesheet/clock-in (via main.js's gate, now passing) is
+      // still the only thing that actually starts a session.
+      await doClock('in');
+    } else {
+      if (statusEl) statusEl.textContent = 'Screen Recording permission is still not enabled.';
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = e?.message || 'Unable to verify permission. Please try again.';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Check Permission Again'; }
+  }
 }
 async function retryCheckoutAfterReport() {
   const btn = document.querySelector('#report-required-card .btn-primary');

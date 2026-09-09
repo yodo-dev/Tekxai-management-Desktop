@@ -97,6 +97,14 @@ function toIpcSafeError(err) {
   // renderer can branch on it instead of pattern-matching message text.
   const backendCode = err?.response?.data?.code;
   if (backendCode) safe.code = backendCode;
+  // Same reasoning for the HTTP status and Retry-After — err.response itself
+  // does NOT survive IPC (only plain properties on the Error do), so a
+  // renderer-side check like e.response.status would silently see undefined
+  // unless these are lifted onto the safe Error explicitly here.
+  const status = err?.response?.status;
+  if (status) safe.status = status;
+  const retryAfter = err?.response?.headers?.['retry-after'];
+  if (retryAfter) safe.retryAfter = retryAfter;
   return safe;
 }
 
