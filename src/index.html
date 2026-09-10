@@ -387,6 +387,16 @@
   <div class="update-card" id="report-required-card"></div>
 </div>
 
+<!-- Monitoring permission gate — same reused backdrop/card classes, own id.
+     Shown when clock-in is rejected locally (main.js, BEFORE any attendance
+     API call) because macOS Screen Recording permission is DENIED/UNKNOWN.
+     No "Skip"/dismiss path — the only way out is actually granting the
+     permission and passing "Check Permission Again", exactly mirroring the
+     report-required modal's "no bypass" shape. -->
+<div class="update-backdrop" id="monitoring-permission-backdrop">
+  <div class="update-card" id="monitoring-permission-card"></div>
+</div>
+
 <!-- Idle-triggered break notice — same reused backdrop/card classes, own id.
      Shown when a resync (refreshToday) finds status ON_BREAK with
      break_source IDLE (see summarize_today_entries in be-work), i.e. the

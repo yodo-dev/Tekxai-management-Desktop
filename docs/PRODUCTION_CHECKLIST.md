@@ -41,13 +41,43 @@ underlying config changes, not on every release.
 
 ## Per-release: platform verification
 
-- [ ] **Windows** — fresh install on a clean VM/machine, then update from the
-      immediately-previous published version.
+A green `build:*` command is a build-succeeded signal, not a
+release-ready signal — it proves the installer was produced, nothing about
+whether it can actually install or update. Treat each row below as a
+separate, non-substitutable gate; passing an earlier one does not imply a
+later one passed (v1.2.3, 2026-08-31, shipped with only the first row done
+and was rolled back — near-total Windows update failure, root-caused to
+stale CDN-cached update manifests, not caught because the real update path
+was never exercised before publishing):
+
+| Gate | What it proves | What it does NOT prove |
+|---|---|---|
+| `npm run build:win`/`build:mac`/`build:linux` exits 0 | The installer was produced | The installer runs, installs, or updates anything |
+| Manually double-click the installer / open the `.dmg` on a clean machine | A **fresh install** works | An **update** from a running previous version works — a fresh install never exercises the running-instance/replace-in-place code path at all |
+| Real `electron-updater` update from the immediately-previous published version, on the actual OS, with the app already running (not a fresh install) | The path every existing employee's app will actually take | Nothing further — this is the one that matters most and the one most likely to be skipped under release pressure |
+
+- [ ] **Windows** — fresh install on a clean VM/machine, then **separately**,
+      with the immediately-previous version already installed and running,
+      let the real `electron-updater` flow silently detect, download, and
+      install the new version (do not just run the new `.exe` manually —
+      that only tests fresh-install, not update). Mandatory on an actual
+      Windows VM/machine before any company-wide release — this repo's build
+      machine is macOS and cannot substitute for it (no Wine/VM currently
+      provisioned; do not treat "the `.exe` was produced on the Mac" as
+      equivalent to this gate).
 - [ ] **macOS** — fresh install (confirm Gatekeeper accepts it with zero
       warnings — a stapling or notarization failure surfaces exactly here),
-      then update from the previous version.
+      then **separately**, with the immediately-previous version already
+      installed and running, let the real `electron-updater` flow update it
+      in place.
 - [ ] **Linux** — AppImage and deb, fresh install and update, on both x64 and
       arm64 if practical.
+- [ ] **First publish of a real company-wide release is never at 100%
+      rollout.** Start at 10% (see "Staged rollout" below), confirm Update
+      Analytics shows no abnormal failure spike for that cohort, then widen.
+      100% on the very first publish removes the one safety net that would
+      have limited v1.2.3's incident to a fraction of the fleet instead of
+      everyone within minutes.
 
 ## Per-release: update flow verification
 

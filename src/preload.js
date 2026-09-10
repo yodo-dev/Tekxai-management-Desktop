@@ -18,6 +18,13 @@ contextBridge.exposeInMainWorld('agent', {
   onScreenshot:  (cb)             => ipcRenderer.on('screenshot-taken', cb),
   onSessionExpired: (cb)          => ipcRenderer.on('session-expired', cb),
 
+  // Monitoring permission gate — the renderer never calls the OS API
+  // itself; it only ever asks main.js's controlled GRANTED/DENIED/UNKNOWN/
+  // NOT_APPLICABLE abstraction, and asks it to open the one settings pane
+  // that can actually change the answer (the app cannot grant this itself).
+  checkMonitoringPermission:            () => ipcRenderer.invoke('monitoring-permission:check'),
+  openMonitoringPermissionSettings:     () => ipcRenderer.invoke('monitoring-permission:open-settings'),
+
   // Desktop auto-update — main.js is the sole source of truth for whether an
   // update exists/is mandatory (via be-work's /desktop/latest-version) and
   // now also for WHEN the download starts: it triggers silently in the

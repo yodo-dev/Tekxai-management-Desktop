@@ -35,12 +35,17 @@ npm run build:win      # nsis installer — signs automatically if CODE_SIGNING.
 npm run build:linux    # AppImage + deb, x64 + arm64
 ```
 
-Confirm the artifacts actually landed at
-`https://releases.tekxai.services/desktop-app/` before moving on — `npm run
-build:*` uploading successfully doesn't guarantee the URL is publicly
-reachable (CDN propagation, permissions, etc.); a quick `curl -I` against the
-new installer URL is cheap insurance against every subsequent employee's
-"Update Now" failing at the `electron-updater.checkForUpdates()` step.
+`npm run build:*` does not upload anything by itself — see
+`RELEASE_PROCESS.md` step 2 for the actual (manual) `aws s3 cp` commands,
+including the `--cache-control` flags on `latest*.yml`/`metadata.json` and
+the CloudFront invalidation. Both are required, not optional — skipping
+either can leave some employees' apps reading a stale manifest for up to 24
+hours after you publish, disagreeing with what the backend already told them
+is available. Confirm the artifacts actually landed at
+`https://releases.tekxai.services/desktop-app/` before moving on — a quick
+`curl -I` against the new installer URL is cheap insurance against every
+subsequent employee's "Update Now" failing at the
+`electron-updater.checkForUpdates()` step.
 
 ## Step 3 — Register the release
 

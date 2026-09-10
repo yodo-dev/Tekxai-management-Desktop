@@ -31,14 +31,53 @@ npm run build:win      # nsis installer
 npm run build:linux    # AppImage + deb, x64 + arm64
 ```
 
-Each of these runs `electron-builder`, which (given the `publish` config in
-`package.json` — a generic, non-GitHub provider) uploads the signed installer
-plus its `latest*.yml` manifest to `releases.tekxai.services/desktop-app/`.
-That upload is what `electron-updater`'s download/verify mechanics rely on —
-this step must complete successfully and the artifacts must actually be
-reachable at that URL before step 3, or every installed app's "Update Now"
-will fail at the `electron-updater.checkForUpdates()` call even though the
-backend says a newer version exists.
+Each of these runs `electron-builder`, which does NOT itself upload anything
+— the `publish` config in `package.json` (a generic, non-GitHub provider)
+only tells `electron-updater` where to look on installed apps; none of the
+`build:*` scripts pass `--publish`, so the resulting installers, blockmaps,
+`latest*.yml`, and `metadata.json` land in `dist/` only. Uploading them to
+`releases.tekxai.services/desktop-app/` (an S3 bucket, `tekxai-desktop-releases`,
+fronted by CloudFront distribution `E3R1EKUUSRAZLQ`) is a separate, manual
+step:
+
+```bash
+cd dist
+BUCKET=s3://tekxai-desktop-releases/desktop-app
+aws s3 cp "TEKxAI Agent-X.Y.Z-universal.dmg" "$BUCKET/TEKxAI Agent-X.Y.Z-universal.dmg"
+aws s3 cp "TEKxAI Agent-X.Y.Z-universal.dmg.blockmap" "$BUCKET/TEKxAI Agent-X.Y.Z-universal.dmg.blockmap"
+aws s3 cp "TEKxAI Agent-X.Y.Z-universal-mac.zip" "$BUCKET/TEKxAI Agent-X.Y.Z-universal-mac.zip"
+aws s3 cp "TEKxAI Agent-X.Y.Z-universal-mac.zip.blockmap" "$BUCKET/TEKxAI Agent-X.Y.Z-universal-mac.zip.blockmap"
+aws s3 cp "TEKxAI Agent Setup X.Y.Z.exe" "$BUCKET/TEKxAI Agent Setup X.Y.Z.exe"
+aws s3 cp "TEKxAI Agent Setup X.Y.Z.exe.blockmap" "$BUCKET/TEKxAI Agent Setup X.Y.Z.exe.blockmap"
+aws s3 cp "TEKxAI Agent-X.Y.Z.AppImage" "$BUCKET/TEKxAI Agent-X.Y.Z.AppImage"
+aws s3 cp "TEKxAI Agent-X.Y.Z-arm64.AppImage" "$BUCKET/TEKxAI Agent-X.Y.Z-arm64.AppImage"
+
+aws s3 cp latest.yml "$BUCKET/latest.yml" --content-type application/yaml --cache-control "no-cache, must-revalidate"
+aws s3 cp latest-mac.yml "$BUCKET/latest-mac.yml" --content-type application/yaml --cache-control "no-cache, must-revalidate"
+aws s3 cp latest-linux.yml "$BUCKET/latest-linux.yml" --content-type application/yaml --cache-control "no-cache, must-revalidate"
+aws s3 cp latest-linux-arm64.yml "$BUCKET/latest-linux-arm64.yml" --content-type application/yaml --cache-control "no-cache, must-revalidate"
+aws s3 cp metadata.json "$BUCKET/metadata.json" --content-type application/json --cache-control "no-cache, must-revalidate"
+
+aws cloudfront create-invalidation --distribution-id E3R1EKUUSRAZLQ \
+  --paths "/desktop-app/latest*.yml" "/desktop-app/metadata.json"
+```
+
+**Both the `--cache-control` flags and the invalidation are required, not
+optional.** The distribution's cache policy is AWS's managed
+`CachingOptimized` (`DefaultTTL: 86400`, i.e. 24 hours) and does not forward
+or consider request headers at all — `electron-updater`'s own
+`Cache-Control: no-cache` request header has no effect against it. Without an
+explicit `--cache-control` on these four small metadata files, any CloudFront
+edge location that already had the previous release's manifest cached keeps
+serving it for up to 24 hours after a new version is published, regardless
+of what the backend's `/desktop/latest-version` says — this caused a
+production incident (v1.2.3, 2026-08-31: near-total Windows update failure,
+rolled back) where clients received a stale manifest disagreeing with the
+version the backend told them to expect. The invalidation clears any
+already-cached copies immediately; the `Cache-Control` header prevents the
+same class of staleness on every release after this one. The versioned
+binary installers/blockmaps intentionally keep the default long TTL — their
+filenames are version-unique, so a stale cached copy is never wrong.
 
 macOS builds also run notarization (`scripts/notarize.js`, `afterSign` hook)
 and DMG stapling (`scripts/staple-dmg.js`) automatically as part of
