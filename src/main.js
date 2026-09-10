@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, systemPreferences, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, systemPreferences, safeStorage, powerMonitor } = require('electron');
 const path = require('path');
 const os = require('os');
 const Store = require('electron-store');
@@ -71,10 +71,12 @@ function delete_token(key) {
 const API_BASE = 'https://api.tekxai.services/api/v1';
 const DASHBOARD_URL = 'https://tekxai.services/employee';
 const SCREENSHOT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const HEARTBEAT_INTERVAL_MS = 45 * 1000; // ~45s while clocked in
 
 let mainWindow = null;
 let screenshotTimer = null;
 let appUsageTimer = null;
+let heartbeatTimer = null;
 let sessionId = null;
 
 // App usage tracking state
@@ -1001,6 +1003,7 @@ async function reportMonitoringPermissionStatus(status) {
 
 async function startScreenshots(token) {
   stopScreenshots();
+  startHeartbeat(token); // liveness heartbeat runs whenever monitoring is active
   let intervalMs = SCREENSHOT_INTERVAL_MS;
   try {
     const axios = require('axios');
@@ -1017,6 +1020,46 @@ async function startScreenshots(token) {
 function stopScreenshots() {
   if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
   stopAppUsage();
+  stopHeartbeat();
+}
+
+// ── Activity heartbeat ───────────────────────────────────────────────────────
+// The authoritative attendance-liveness signal (backend
+// activity-liveness.service.js). Every ~45s while clocked in we POST the
+// REAL OS input-idle time (powerMonitor.getSystemIdleTime(), seconds since
+// the last keyboard/mouse event) — NOT any keystroke/mouse content, just
+// that one integer. The backend derives last_input_at = now − idle. This is
+// what lets a person working for hours in ONE window (no foreground-app
+// switch, so no app_usage_logs row) still read as ACTIVE.
+//
+// Platform note: getSystemIdleTime() is reliable on Windows and macOS. On
+// Linux it is accurate under X11 and returns 0 under a pure Wayland session
+// (no portal for global idle) — so on Wayland the heartbeat still proves
+// the agent is alive (freshness) but its idle reading is a floor, not exact.
+// A failed POST never throws and never stops the timer; the loop is a fixed
+// interval with a bounded request timeout.
+async function sendHeartbeat(token) {
+  if (!token) return;
+  try {
+    const idleSeconds = Math.max(0, Math.round(powerMonitor.getSystemIdleTime()));
+    const axios = require('axios');
+    await axios.post(`${API_BASE}/monitoring/heartbeat`, {
+      session_id: sessionId || null,
+      idle_seconds: idleSeconds,
+      active_app: lastAppName || null,
+      agent_version: app.getVersion(),
+    }, { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 }).catch(() => {});
+  } catch (_) { /* never let a heartbeat failure disturb capture */ }
+}
+
+function startHeartbeat(token) {
+  stopHeartbeat();
+  sendHeartbeat(token);
+  heartbeatTimer = setInterval(() => sendHeartbeat(token), HEARTBEAT_INTERVAL_MS);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
 }
 
 // ── App usage tracking ────────────────────────────────────────────────────────
