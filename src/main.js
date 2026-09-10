@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, systemPreferences, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, systemPreferences, safeStorage, powerMonitor } = require('electron');
 const path = require('path');
 const os = require('os');
 const Store = require('electron-store');
@@ -71,11 +71,29 @@ function delete_token(key) {
 const API_BASE = 'https://api.tekxai.services/api/v1';
 const DASHBOARD_URL = 'https://tekxai.services/employee';
 const SCREENSHOT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+// Activity heartbeat — every ~45s while clocked in. Carries the REAL OS
+// keyboard/mouse idle time (powerMonitor.getSystemIdleTime()), which is the
+// backend's primary liveness signal. This is what stops the backend
+// classifying a healthy employee working in ONE window (no foreground-app
+// switch, so no app_usage_logs row) as idle and auto-checking them out.
+const HEARTBEAT_INTERVAL_MS = 45 * 1000;
 
 let mainWindow = null;
 let screenshotTimer = null;
 let appUsageTimer = null;
-let sessionId = null;
+let heartbeatTimer = null;
+// Persisted (electron-store) so it survives an app restart / auto-updater
+// relaunch — pollAppUsage / heartbeat bail without it, so if it were only
+// in process memory a resumed session would stop reporting activity until
+// the next screenshot lazily recreated it (up to 5 min of silence that the
+// backend idle job would read as real inactivity).
+let sessionId = store.get('monitoring_session_id') || null;
+
+function setSessionId(id) {
+  sessionId = id || null;
+  if (id) store.set('monitoring_session_id', id);
+  else store.delete('monitoring_session_id');
+}
 
 // App usage tracking state
 let lastAppName = null;
@@ -629,7 +647,7 @@ ipcMain.handle('logout', async () => {
   delete_token('refresh_token');
   store.delete('user');
   store.set('clocked_in', false);
-  sessionId = null;
+  setSessionId(null);
 });
 
 ipcMain.handle('get-today', async () => {
@@ -641,44 +659,34 @@ ipcMain.handle('get-today', async () => {
     }));
     const payload = res.data.payload;
 
-    // Root-cause fix for the "reopens on break after an update" bug:
-    // startScreenshots/startAppUsage were previously only ever started from
-    // the clock-in and break-end IPC handlers — never from this resync path,
-    // which is the ONLY thing that runs on a fresh app launch (including an
-    // auto-updater relaunch). So a genuinely-working session that survives
-    // an app restart stopped reporting app_usage_logs the moment the old
-    // process quit, and never resumed. be-work's auto-checkout job (see
-    // auto-checkout.job.js) treats that silence as real idle time and, once
-    // idle_timeout_minutes (default 15) elapses with zero fresh activity, it
-    // legitimately flips the session to ON_BREAK (break_source: 'IDLE') —
-    // the renderer then correctly (and truthfully) shows "On Break" on
-    // reopen, because by then it genuinely IS on break per the backend's own
-    // records. The bug was never in how break state gets restored (that
-    // already treats the backend as authoritative, correctly) — it was that
-    // this app silently stopped holding up its end of the activity contract
-    // across a restart, which is what caused the backend to (correctly, by
-    // its own rules) create that break in the first place.
-    //
-    // Fix: resync monitoring to match the real backend status every time
-    // this resolves, not just on explicit clock-in/break-end. If the entry
-    // is open and NOT on break, resume screenshots/app-usage so a restart
-    // (update or otherwise) never again produces a silent activity gap long
-    // enough to trigger the idle job. If the entry IS on break — including a
-    // break that already existed before this restart — leave/put monitoring
-    // stopped, exactly like a manual break does; this is what correctly
-    // preserves a genuine active break instead of clearing it. Both
-    // startScreenshots/startAppUsage and stopScreenshots already start by
-    // clearing their own timers, so calling them redundantly here is safe.
+    // Resync monitoring to the real backend session state on every resolve
+    // (this handler is the ONLY thing that runs on a fresh launch, incl. an
+    // auto-updater relaunch). Current backend activity model:
+    //   - A MANUAL break sets entry.status = 'ON_BREAK'. During it, capture
+    //     is paused on purpose — nothing worth recording while the employee
+    //     has stepped away.
+    //   - IDLE is NOT a break. The backend tracks it as an independent
+    //     timesheet_activity_periods(type=IDLE) row and never touches
+    //     `status`; it auto-resolves the moment activity resumes. So we
+    //     keep capturing (screenshots + app-usage + heartbeat) whenever the
+    //     session is open and not on a manual break — the heartbeat is what
+    //     keeps the backend's liveness signal alive across a restart so a
+    //     genuinely-working resumed session is never mis-read as idle.
+    // `payload.entry` also carries `activity_state` ('ACTIVE' | 'IDLE' |
+    // 'ON_BREAK' | 'COMPLETED') and `exceptions` from the backend's
+    // canonical calculation — passed through to the renderer untouched.
     if (payload?.clocked_in && !payload?.clocked_out) {
       const currentToken = get_token('auth_token');
       if (payload.entry?.status === 'ON_BREAK') {
-        stopScreenshots();
+        stopScreenshots(); // also stops app-usage + heartbeat
       } else {
+        await ensureMonitoringSession(currentToken); // reuse the persisted id, or make one, BEFORE the loops start
         startScreenshots(currentToken);
-        startAppUsage(currentToken);
+        startAppUsage(currentToken); // also starts the heartbeat
       }
     } else {
       stopScreenshots();
+      setSessionId(null); // session is over — don't carry a stale id into the next clock-in
     }
 
     return payload;
@@ -723,9 +731,18 @@ ipcMain.handle('clock-in', async () => {
         agent_version: app.getVersion(),
         os_platform: process.platform,
       }, { headers: { Authorization: `Bearer ${token}` } });
-      sessionId = sessRes.data.payload.id;
+      setSessionId(sessRes.data.payload.id);
     });
-  } catch (_) {}
+  } catch (err) {
+    // Do NOT swallow this silently: with no monitoring session the activity
+    // signal (app-usage + heartbeat) can't be attributed and the backend
+    // would eventually read the silence as idle. It is not fatal to
+    // clock-in itself (attendance is a separate record), and
+    // ensureMonitoringSession() below — plus the heartbeat/screenshot
+    // loops — will keep retrying, so recovery is automatic within one
+    // heartbeat (~45s). Just make it visible.
+    console.error('[monitoring] session start failed at clock-in (will retry):', err.message);
+  }
 
   let entry;
   try {
@@ -827,7 +844,7 @@ ipcMain.handle('clock-out', async () => {
             headers: { Authorization: `Bearer ${token}` },
           }));
         } catch (_) {}
-        sessionId = null;
+        setSessionId(null);
       }
     }
     throw toIpcSafeError(err);
@@ -840,18 +857,19 @@ ipcMain.handle('clock-out', async () => {
         headers: { Authorization: `Bearer ${token}` },
       }));
     } catch (_) {}
-    sessionId = null;
+    setSessionId(null);
   }
 
   store.set('clocked_in', false);
   return res.data.payload;
 });
 
-// Manual equivalent of the auto-checkout job's idle-triggered ON_BREAK flip
-// (be-work scheduler/jobs/auto-checkout.job.js) — same backend status, just
-// user-initiated instead of idle-triggered. Screenshot/app-usage capture is
-// paused for the same reason the job pauses it on idle: nothing worth
-// recording while the user has stepped away on purpose.
+// A MANUAL break — the ONLY thing that sets the backend entry to
+// ON_BREAK. Idle is a separate, backend-detected concept
+// (timesheet_activity_periods type=IDLE) and never comes through here.
+// Screenshot / app-usage / heartbeat capture is paused for the duration:
+// the employee has stepped away on purpose, so there is nothing worth
+// recording and no need to keep feeding the liveness signal.
 ipcMain.handle('break-start', async () => {
   const axios = require('axios');
   try {
@@ -1017,6 +1035,7 @@ async function startScreenshots(token) {
 function stopScreenshots() {
   if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
   stopAppUsage();
+  stopHeartbeat();
 }
 
 // ── App usage tracking ────────────────────────────────────────────────────────
@@ -1027,14 +1046,57 @@ async function startAppUsage(token) {
   lastWindowTitle = null;
   lastAppStart = Date.now();
   appUsageTimer = setInterval(() => pollAppUsage(token), 10_000); // poll every 10s
+  // The heartbeat travels with app-usage: both are "the agent is watching
+  // this session" signals. app-usage only fires on a foreground switch;
+  // the heartbeat fires unconditionally with the real OS idle time.
+  startHeartbeat(token);
 }
 
 function stopAppUsage() {
   if (appUsageTimer) { clearInterval(appUsageTimer); appUsageTimer = null; }
 }
 
+// ── Activity heartbeat ───────────────────────────────────────────────────────
+
+async function sendHeartbeat(token) {
+  try {
+    await ensureMonitoringSession(token);
+    // The REAL OS keyboard/mouse idle time — seconds since the last input
+    // event anywhere on the machine. NOT a fabricated keypress count, and
+    // NOT "the timer is alive" — the backend decides idle from this.
+    const idleSeconds = Math.max(0, Math.round(powerMonitor.getSystemIdleTime()));
+    let activeApp = null;
+    try {
+      const win = await require('active-win')();
+      activeApp = win?.owner?.name || win?.title || null;
+    } catch (_) {}
+    const axios = require('axios');
+    await axios.post(`${API_BASE}/monitoring/heartbeat`, {
+      session_id: sessionId || null,
+      idle_seconds: idleSeconds,
+      active_app: activeApp,
+      agent_version: app.getVersion(),
+    }, { headers: { Authorization: `Bearer ${token}` } });
+  } catch (err) {
+    // Non-fatal — a missed heartbeat just means the backend falls back to
+    // app-usage / screenshot corroboration for this interval.
+    console.error('[monitoring] heartbeat failed:', err.message);
+  }
+}
+
+function startHeartbeat(token) {
+  stopHeartbeat();
+  sendHeartbeat(token); // send one immediately, don't wait a full interval
+  heartbeatTimer = setInterval(() => sendHeartbeat(token), HEARTBEAT_INTERVAL_MS);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+}
+
 async function pollAppUsage(token) {
-  if (!sessionId) return;
+  await ensureMonitoringSession(token);
+  if (!sessionId) return; // still couldn't get one — try again next tick
   try {
     const activeWin = require('active-win');
     const win = await activeWin();
@@ -1071,19 +1133,30 @@ async function pollAppUsage(token) {
   } catch (_) {}
 }
 
+// Idempotent: returns the current monitoring session id, creating (and
+// persisting) one only if we don't already have it. Every activity
+// producer (screenshot / app-usage / heartbeat) calls this so a session
+// that failed to start at clock-in, or a restart that came up before a
+// session existed, self-heals on the next tick — without ever creating a
+// second session while one is already in hand.
+async function ensureMonitoringSession(token) {
+  if (sessionId) return sessionId;
+  try {
+    const axios = require('axios');
+    const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
+      agent_version: app.getVersion(),
+      os_platform: process.platform,
+    }, { headers: { Authorization: `Bearer ${token}` } });
+    setSessionId(sessRes.data?.payload?.id);
+  } catch (err) {
+    console.error('[monitoring] ensureMonitoringSession failed (will retry next tick):', err.message);
+  }
+  return sessionId;
+}
+
 async function takeScreenshot(token) {
   try {
-    // Try to recover sessionId if missing
-    if (!sessionId) {
-      const axios = require('axios');
-      try {
-        const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
-          agent_version: app.getVersion(),
-          os_platform: process.platform,
-        }, { headers: { Authorization: `Bearer ${token}` } });
-        sessionId = sessRes.data?.payload?.id;
-      } catch (_) {}
-    }
+    await ensureMonitoringSession(token);
 
     const screenshot = require('screenshot-desktop');
     const axios = require('axios');
