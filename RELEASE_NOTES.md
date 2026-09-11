@@ -32,3 +32,18 @@ Release notes for the Desktop Release API's `release_notes` field (rendered via 
 ## Fixes
 - **Displayed clock/time-tracking state could get stuck out of sync with the backend after a failed clock-out.** This is a client-side display/synchronization fix, not a data-correction fix — a production investigation confirmed the backend's attendance records were always correct and clock-out is validated atomically before any database write. The issue was that when checkout was blocked by the mandatory Daily Report requirement (`REPORT_REQUIRED`), or when a submitted-report retry checkout failed again, the app kept showing the report-required screen without ever re-fetching the real session state from the server. If the backend later force-closed that session in the background (e.g. the shift-end auto-checkout job), the app's on-screen timer kept counting upward on stale local data instead of reflecting the actual closed session, which could show a badly inflated tracked time until the next user action or app restart. Both failure paths now resync with the backend immediately so the displayed status/timer always reflects the real session state.
 - Added a low-frequency (5-minute) background resync while clocked in, as a defense-in-depth backstop: with no fix, an idle session with zero user interaction had no way to notice a server-side force-close until the next click or app restart (unbounded staleness). This closes that gap generally, not just for the specific bug above.
+
+# TEKxAI Agent 1.3.0
+
+(1.2.5 was prepared but never published — its two fixes below ship for the first time in this release, together with the activity heartbeat and monitoring-permission gate.)
+
+## What's New
+- **Activity heartbeat** — while clocked in, the agent now sends a ~45-second liveness signal (OS-idle time in seconds, agent version, current app name — no keystroke or mouse content) so a long, unbroken stretch in one application is no longer indistinguishable from an idle machine. Previously, activity was only inferred from foreground-app *switches*, so working in a single window for hours produced no signal at all.
+- **Screen-recording permission gate (macOS)** — the app now checks the OS-level Screen Recording permission before allowing clock-in on macOS, and can open System Settings' Screen Recording pane directly if it isn't granted. Windows and Linux have no equivalent OS permission prompt for this app's capture method today, and are treated as not applicable rather than silently assumed granted.
+
+## Fixes
+- Fixed a false "session expired" logout on a transient failure of the token-refresh request itself — previously any failure of `POST /auth/refresh` wiped the local session, with no distinction between a genuinely invalid refresh token and a refresh request that simply failed to reach the server.
+- Fixed duplicate `/auth/login` requests (the Sign In button and the Enter-key handler could both fire `doLogin()` for the same click) and a raw, unfriendly error message being shown for a 429 rate-limit response on login.
+
+## Under the hood
+- Release-process documentation hardened following the v1.2.3 incident: update-path UAT is now called out as a separate, non-substitutable verification step, with explicit manual `aws s3 cp` + CloudFront invalidation steps and staged-rollout guidance.
