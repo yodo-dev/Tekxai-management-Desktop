@@ -454,6 +454,16 @@ function setSsIndicator(active) {
 
 // ── Ticker ────────────────────────────────────────────────────────────────────
 
+// Second layer of defense alongside webPreferences.backgroundThrottling:
+// false (main.js) — that setting is what actually keeps startTick()'s
+// setInterval firing while the window is unfocused/hidden, but resyncing
+// immediately the moment the window becomes visible/focused again means
+// the on-screen timer snaps to the true elapsed time right away rather
+// than waiting for the next 1s tick or the 5-minute reconcileInterval
+// backstop, in case anything (OS-level app nap, a slow resume from sleep)
+// still introduces a gap.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshToday(); });
+
 function startTick() {
   stopTick();
   tickInterval = setInterval(() => {
