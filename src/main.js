@@ -550,6 +550,17 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // This is a background utility widget — employees are expected to
+      // leave it unfocused/behind other windows while it keeps tracking.
+      // Electron/Chromium heavily throttles (and can effectively pause) a
+      // renderer's setInterval once the window loses visibility/focus,
+      // which froze the on-screen "Xh:XXm:XXs" ticker (renderer.js's
+      // startTick, purely a display timer) while the real attendance data
+      // — driven by main-process API calls, never subject to this
+      // throttling — kept updating correctly in the backend/timesheet.
+      // Disabling it here is the documented fix for exactly this class of
+      // "always-on tray/menubar timer freezes when backgrounded" bug.
+      backgroundThrottling: false,
     },
     icon: path.join(__dirname, '../assets/icon.png'),
   });

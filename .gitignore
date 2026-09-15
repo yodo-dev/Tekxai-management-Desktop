@@ -3,6 +3,5 @@ dist/
 out/
 *.log
 .DS_Store
-.env
-.env.*
 !.env.*.example
+config.bat
