@@ -550,6 +550,17 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // This is a background utility widget — employees are expected to
+      // leave it unfocused/behind other windows while it keeps tracking.
+      // Electron/Chromium heavily throttles (and can effectively pause) a
+      // renderer's setInterval once the window loses visibility/focus,
+      // which froze the on-screen "Xh:XXm:XXs" ticker (renderer.js's
+      // startTick, purely a display timer) while the real attendance data
+      // — driven by main-process API calls, never subject to this
+      // throttling — kept updating correctly in the backend/timesheet.
+      // Disabling it here is the documented fix for exactly this class of
+      // "always-on tray/menubar timer freezes when backgrounded" bug.
+      backgroundThrottling: false,
     },
     icon: path.join(__dirname, '../assets/icon.png'),
   });
@@ -681,8 +692,24 @@ ipcMain.handle('get-today', async () => {
         startScreenshots(currentToken);
         startAppUsage(currentToken);
       }
+      // Reconciliation path for the shift-end reminder — covers both a
+      // fresh app launch recovering an already-open session (scheduleShiftEndReminder
+      // no-ops if nothing changed) and detecting that this session is STILL
+      // open after this resync, which matters when a reminder popup is
+      // currently showing: if it were closed (see the else branch below),
+      // that means a web checkout raced with it, so keep it up here instead.
+      if (payload.entry?.check_in) {
+        scheduleShiftEndReminder(currentToken, new Date(payload.entry.check_in).getTime());
+      }
     } else {
       stopScreenshots();
+      // Covers checkout initiated from the Web App (section 7): the next
+      // periodic get-today resync (renderer's 5-minute backstop, or the
+      // visibility-change resync on window focus) lands here and must tear
+      // down any pending/active reminder — including closing an open popup
+      // — exactly like a desktop-initiated checkout already does via
+      // clearShiftEndReminder() in the clock-out handler above.
+      clearShiftEndReminder();
     }
 
     return payload;
@@ -802,6 +829,8 @@ ipcMain.handle('clock-in', async () => {
   const currentToken = get_token('auth_token');
   startScreenshots(currentToken);
   startAppUsage(currentToken);
+  clearShiftEndReminder();
+  if (entry?.check_in) scheduleShiftEndReminder(currentToken, new Date(entry.check_in).getTime());
   return entry;
 });
 
@@ -852,6 +881,7 @@ ipcMain.handle('clock-out', async () => {
     // that's still open locally.
     if (err.response?.status === 404) {
       store.set('clocked_in', false);
+      clearShiftEndReminder();
       if (sessionId) {
         try {
           await authRequest((token) => axios.post(`${API_BASE}/monitoring/session/${sessionId}/end`, {}, {
@@ -875,6 +905,7 @@ ipcMain.handle('clock-out', async () => {
   }
 
   store.set('clocked_in', false);
+  clearShiftEndReminder();
   return res.data.payload;
 });
 
@@ -909,6 +940,116 @@ ipcMain.handle('break-end', async () => {
   } catch (err) {
     throw toIpcSafeError(err);
   }
+});
+
+// ── Shift-end "are you still working?" reminder ─────────────────────────────
+// main.js is the sole scheduler — exactly one setTimeout chain can exist at
+// once (shiftEndReminderTimer), guarded by clearShiftEndReminder() at every
+// entry point (clock-in, clock-out, and every get-today resync). The
+// renderer holds no scheduling state of its own; it only renders whatever
+// 'shift-end-reminder:show'/':hide' tells it and forwards the two button
+// clicks back over IPC. This is deliberate: a renderer window can be
+// minimized/backgrounded (see the Chromium timer-throttling issue this same
+// release fixes for the display ticker), but main.js's timers are never
+// throttled, so the reminder and its 30s auto-checkout still fire on time
+// even if nobody is looking at the window.
+let shiftEndReminderTimer = null;   // fires the next "are you still working?" popup
+let autoCheckoutTimer = null;       // 30s countdown while a popup is showing
+let shiftEndReminderActive = false; // true once the first popup for this session has fired — blocks scheduleShiftEndReminder from re-deriving shift-end from a stale checkInEpoch and resetting the 30-min cycle
+
+// Pure timezone math lives in shift-end.js (unit-testable directly with
+// `node --test`, unlike this file — main.js requires 'electron' at the top,
+// which throws outside an Electron process).
+const { shiftEndEpochForCheckIn } = require('./shift-end');
+
+function clearShiftEndReminder() {
+  if (shiftEndReminderTimer) { clearTimeout(shiftEndReminderTimer); shiftEndReminderTimer = null; }
+  if (autoCheckoutTimer) { clearTimeout(autoCheckoutTimer); autoCheckoutTimer = null; }
+  shiftEndReminderActive = false;
+  mainWindow?.webContents.send('shift-end-reminder:hide');
+}
+
+// Schedules the FIRST shift-end reminder for the currently open session.
+// Safe to call repeatedly (every clock-in and every get-today resync) —
+// no-ops if a reminder cycle is already scheduled/active, so a periodic
+// resync while clocked in never resets or duplicates the timer.
+async function scheduleShiftEndReminder(token, checkInEpoch) {
+  if (shiftEndReminderTimer || shiftEndReminderActive) return;
+  if (!token || !checkInEpoch) return;
+  try {
+    const axios = require('axios');
+    const res = await axios.get(`${API_BASE}/attendance/my-shift`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const shift = res.data?.payload;
+    if (!shift?.end_time) return; // no shift configured — nothing to remind about
+    const endEpoch = shiftEndEpochForCheckIn(checkInEpoch, shift.end_time);
+    const delayMs = Math.max(0, endEpoch - Date.now());
+    shiftEndReminderTimer = setTimeout(() => fireShiftEndReminder(), delayMs);
+  } catch (_) {
+    // Can't reach the backend / no shift assigned — fail silent, exactly
+    // like sendHeartbeat and the other best-effort background calls in this
+    // file. The employee is never auto-checked-out just because this GET
+    // failed; that only ever happens via the popup's own explicit flow.
+  }
+}
+
+async function fireShiftEndReminder() {
+  shiftEndReminderTimer = null;
+  // Guard against a race with clock-out that landed between the timer
+  // firing and this callback running.
+  if (!get_token('auth_token')) return;
+  shiftEndReminderActive = true;
+  mainWindow?.webContents.send('shift-end-reminder:show');
+  if (autoCheckoutTimer) clearTimeout(autoCheckoutTimer);
+  autoCheckoutTimer = setTimeout(() => performAutoCheckout(), 30 * 1000);
+}
+
+// Shared by the 30s no-response timeout and the popup's own "NO, CHECK OUT"
+// button — both must go through the real backend checkout, never flip local
+// state on their own (per the "backend is the source of truth" rule this
+// whole feature exists to respect).
+async function performAutoCheckout() {
+  autoCheckoutTimer = null;
+  const axios = require('axios');
+  try {
+    const res = await authRequest((token) => axios.post(`${API_BASE}/timesheet/clock-out`, {}, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    stopScreenshots();
+    if (sessionId) {
+      try {
+        await authRequest((token) => axios.post(`${API_BASE}/monitoring/session/${sessionId}/end`, {}, {
+          headers: { Authorization: `Bearer ${token}` },
+        }));
+      } catch (_) {}
+      sessionId = null;
+    }
+    store.set('clocked_in', false);
+    clearShiftEndReminder();
+    mainWindow?.webContents.send('shift-end-reminder:checked-out', res.data.payload);
+  } catch (err) {
+    // REPORT_REQUIRED or a transient failure — either way this can't
+    // silently invent a checked-out state. Leave the popup up; the
+    // employee (or the next reconciliation, if the backend actually did
+    // close it) resolves it from here.
+    console.error('[shift-end-reminder] auto-checkout failed:', err.message);
+  }
+}
+
+ipcMain.handle('shift-end-reminder:continue', () => {
+  if (autoCheckoutTimer) { clearTimeout(autoCheckoutTimer); autoCheckoutTimer = null; }
+  mainWindow?.webContents.send('shift-end-reminder:hide');
+  // Next reminder is a fixed 30 minutes later — not re-derived from
+  // GET /attendance/my-shift again, per the "repeat every 30 minutes"
+  // requirement (distinct from the first reminder, which is derived from
+  // the shift's configured end time).
+  shiftEndReminderTimer = setTimeout(() => fireShiftEndReminder(), 30 * 60 * 1000);
+});
+
+ipcMain.handle('shift-end-reminder:checkout', async () => {
+  if (autoCheckoutTimer) { clearTimeout(autoCheckoutTimer); autoCheckoutTimer = null; }
+  await performAutoCheckout();
 });
 
 ipcMain.handle('open-dashboard', () => {

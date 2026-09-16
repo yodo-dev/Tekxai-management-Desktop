@@ -77,6 +77,18 @@ let breakSource = null;
   window.agent.onUpdateProgress((data) => renderUpdateProgress(data));
   window.agent.onUpdateReady((data) => renderUpdateReady(data));
   window.agent.onUpdateError((message) => renderUpdateError(message));
+
+  // Shift-end reminder — main.js owns all scheduling; this renderer only
+  // renders what it's told and forwards the two button clicks back.
+  // Optional-chained: older/minimal test harnesses that predate this
+  // feature don't stub these three agent methods, and that's fine — this
+  // wiring is a no-op without them, never a hard failure.
+  window.agent.onShiftEndReminderShow?.(() => showShiftEndReminderModal());
+  window.agent.onShiftEndReminderHide?.(() => hideShiftEndReminderModal());
+  window.agent.onShiftEndReminderCheckedOut?.((entry) => {
+    hideShiftEndReminderModal();
+    applyClockOutResult(entry || {});
+  });
 })();
 
 // ── Login ─────────────────────────────────────────────────────────────────────
@@ -515,6 +527,23 @@ function setSsIndicator(active) {
 
 // ── Ticker ────────────────────────────────────────────────────────────────────
 
+// Second layer of defense alongside webPreferences.backgroundThrottling:
+// false (main.js) — that setting is what actually keeps startTick()'s
+// setInterval firing while the window is unfocused/hidden, but resyncing
+// immediately the moment the window becomes visible/focused again means
+// the on-screen timer snaps to the true elapsed time right away rather
+// than waiting for the next 1s tick or the 5-minute reconcileInterval
+// backstop, in case anything (OS-level app nap, a slow resume from sleep)
+// still introduces a gap. Also doubles as the desktop<->web reconciliation
+// point required when returning from a minimize/lock/sleep — refreshToday()
+// is the same backend-is-source-of-truth call the 5-minute backstop uses.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshToday(); });
+// Belt-and-suspenders alongside visibilitychange above — window focus can
+// fire without a visibility change on some Windows minimize/restore
+// sequences. refreshToday() is idempotent (it fully reconciles from
+// scratch every call), so redundant calls here are harmless.
+window.addEventListener?.('focus', () => refreshToday());
+
 function startTick() {
   stopTick();
   tickInterval = setInterval(() => {
@@ -804,6 +833,48 @@ async function retryClockInAfterCaptureFailure() {
   // runs the real capture check itself.
   await doClock('in');
 }
+// ── Shift-end "are you still working?" reminder ─────────────────────────────
+// Pure display + button-forwarding — main.js owns the schedule, the 30s
+// auto-checkout countdown, and the 30-minute repeat cycle (see
+// scheduleShiftEndReminder/fireShiftEndReminder there). This modal never
+// decides attendance state on its own; both buttons just invoke an IPC call
+// whose result (or the backend's own auto-checkout) is what actually changes
+// anything.
+function showShiftEndReminderModal() {
+  document.getElementById('shift-end-reminder-card').innerHTML = `
+    <div class="update-icon force">⏰</div>
+    <div>
+      <div class="update-title">Are you still working?</div>
+      <div class="update-subtitle force">Your shift has ended. Let us know if you're continuing to work — otherwise you'll be checked out automatically in 30 seconds.</div>
+    </div>
+    <div class="update-actions">
+      <button class="btn btn-outline" onclick="shiftEndReminderCheckout()">No, Check Out</button>
+      <button class="btn btn-primary" onclick="shiftEndReminderContinue()">Yes, Continue Working</button>
+    </div>
+  `;
+  document.getElementById('shift-end-reminder-backdrop').classList.add('active');
+}
+function hideShiftEndReminderModal() {
+  document.getElementById('shift-end-reminder-backdrop').classList.remove('active');
+}
+async function shiftEndReminderContinue() {
+  hideShiftEndReminderModal();
+  try { await window.agent.shiftEndReminderContinue(); } catch (_) {}
+}
+async function shiftEndReminderCheckout() {
+  const btn = document.querySelector('#shift-end-reminder-card .btn-outline');
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking out…'; }
+  try {
+    await window.agent.shiftEndReminderCheckout();
+    // The 'shift-end-reminder:checked-out' listener (registered in the boot
+    // IIFE) applies the result and hides this modal — no need to duplicate
+    // that here.
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'No, Check Out'; }
+    alert(e?.message || 'Checkout failed. Please try again.');
+  }
+}
+
 async function retryCheckoutAfterReport() {
   const btn = document.querySelector('#report-required-card .btn-primary');
   if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }

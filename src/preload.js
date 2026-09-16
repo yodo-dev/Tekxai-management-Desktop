@@ -46,4 +46,15 @@ contextBridge.exposeInMainWorld('agent', {
   onUpdateProgress:     (cb)      => ipcRenderer.on('desktop-update:progress', (_e, data) => cb(data)),
   onUpdateReady:        (cb)      => ipcRenderer.on('desktop-update:ready', (_e, data) => cb(data)),
   onUpdateError:        (cb)      => ipcRenderer.on('desktop-update:error', (_e, message) => cb(message)),
+
+  // Shift-end "are you still working?" reminder — main.js is the sole
+  // scheduler (see scheduleShiftEndReminder/fireShiftEndReminder in
+  // main.js); this bridge only carries its show/hide/checked-out signals in
+  // and the employee's two button clicks back out. No scheduling state
+  // lives in the renderer.
+  onShiftEndReminderShow:       (cb) => ipcRenderer.on('shift-end-reminder:show', cb),
+  onShiftEndReminderHide:       (cb) => ipcRenderer.on('shift-end-reminder:hide', cb),
+  onShiftEndReminderCheckedOut: (cb) => ipcRenderer.on('shift-end-reminder:checked-out', (_e, entry) => cb(entry)),
+  shiftEndReminderContinue:     ()   => ipcRenderer.invoke('shift-end-reminder:continue'),
+  shiftEndReminderCheckout:     ()   => ipcRenderer.invoke('shift-end-reminder:checkout'),
 });

@@ -418,6 +418,18 @@
   <div class="update-card" id="idle-break-card"></div>
 </div>
 
+<!-- Shift-end "are you still working?" reminder — same reused backdrop/card
+     classes, own id. main.js is the sole scheduler (see scheduleShiftEndReminder
+     in main.js): it computes shift end from GET /attendance/my-shift, fires
+     'shift-end-reminder:show' at that time, and owns the 30s auto-checkout
+     countdown itself so the reminder still resolves correctly even if this
+     window is minimized/backgrounded when it fires. This card only renders
+     what main.js tells it to and forwards the two button clicks back over
+     IPC — it holds no scheduling logic of its own. -->
+<div class="update-backdrop" id="shift-end-reminder-backdrop">
+  <div class="update-card" id="shift-end-reminder-card"></div>
+</div>
+
 
 <script src="renderer.js"></script>
 </body>
