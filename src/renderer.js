@@ -65,6 +65,7 @@ let breakSource = null;
     // otherwise it would keep calling refreshToday() against a session
     // the main process already knows is gone.
     stopTick();
+    stopProactiveMonitoringChecks();
     showLogin('Your session expired. Please sign in again.');
   });
 
@@ -155,6 +156,7 @@ document.addEventListener('keydown', (e) => {
 
 async function doLogout() {
   stopTick();
+  stopProactiveMonitoringChecks();
   await window.agent.logout();
   clockedIn = false; clockedOut = false; startEpoch = 0; priorSeconds = 0; screenshotCount = 0;
   showLogin();
@@ -182,6 +184,53 @@ function showDashboard(user) {
 
   document.getElementById('login-screen').classList.remove('active');
   document.getElementById('dashboard-screen').classList.add('active');
+
+  startProactiveMonitoringChecks();
+}
+
+// ── Proactive monitoring-permission check ───────────────────────────────────
+// Previously this app only ever discovered a broken screen-capture setup
+// (permission denied, or — on Windows/Linux, which have no OS permission
+// prompt at all — an actual capture failure) the moment someone clicked
+// Clock In. An employee who was never going to be able to clock in had no
+// way to know until they tried, and if it broke mid-session (permission
+// revoked, AV update, etc.) there was no re-check until their next
+// clock-in. Runs once right after login/auto-login, then on a recurring
+// timer for as long as the renderer is open — pops the same blocking modal
+// clock-in uses, without requiring a clock-in attempt to trigger it.
+const PROACTIVE_MONITORING_CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 min
+let proactiveMonitoringCheckTimer = null;
+
+function startProactiveMonitoringChecks() {
+  if (proactiveMonitoringCheckTimer) return; // showDashboard can run more than once per app session
+  runProactiveMonitoringCheck();
+  proactiveMonitoringCheckTimer = setInterval(runProactiveMonitoringCheck, PROACTIVE_MONITORING_CHECK_INTERVAL_MS);
+}
+
+function stopProactiveMonitoringChecks() {
+  if (proactiveMonitoringCheckTimer) { clearInterval(proactiveMonitoringCheckTimer); proactiveMonitoringCheckTimer = null; }
+}
+
+async function runProactiveMonitoringCheck() {
+  // Never interrupt a session already clocked in with a background capture
+  // attempt mid-work — the recurring screenshot interval already proves
+  // capture works while actively tracking, and takeScreenshot() failures
+  // during that loop are a separate, already-covered path (main.js still
+  // has no per-failure UI for those, but re-verifying here would just be a
+  // second capture on top of the real one on the same tick). Only relevant
+  // while idle/not clocked in, i.e. exactly when clock-in is what's next.
+  if (clockedIn) return;
+  // Don't stack a second popup on top of one already showing (e.g. the
+  // user hasn't dismissed/resolved the last check yet).
+  if (document.getElementById('monitoring-permission-backdrop')?.classList.contains('active')) return;
+  try {
+    const { status, capture_error } = await window.agent.verifyMonitoringCaptureFull();
+    if (status === 'DENIED' || status === 'UNKNOWN') {
+      showMonitoringPermissionModal(status === 'UNKNOWN');
+    } else if (status === 'CAPTURE_FAILED') {
+      showMonitoringCaptureFailedModal(capture_error);
+    }
+  } catch (_) { /* best-effort — a failed check here must never crash the renderer */ }
 }
 
 // ── Restore today's session ───────────────────────────────────────────────────
@@ -369,6 +418,14 @@ async function doClock(action) {
       // happened on this attempt).
       setTrackerUI('idle');
       showMonitoringPermissionModal(e.code === 'MONITORING_PERMISSION_UNVERIFIED');
+    } else if (e?.code === 'MONITORING_CAPTURE_FAILED') {
+      // Same fail-closed shape as the permission-denied branch above, but
+      // for the cross-platform case: a real screenshot capture was
+      // attempted and threw (no OS permission dialog to point at — this
+      // covers Windows/Linux, and a macOS capture that fails despite
+      // 'GRANTED' TCC status). e.message carries the real error text.
+      setTrackerUI('idle');
+      showMonitoringCaptureFailedModal(e.message);
     } else {
       setTrackerUI(clockedIn ? 'active' : 'idle');
       alert(e?.response?.data?.message || e?.message || 'Action failed');
@@ -714,6 +771,34 @@ async function recheckMonitoringPermission() {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Check Permission Again'; }
   }
+}
+
+// Reuses the same backdrop/card DOM as the permission modal above — no
+// "Open System Settings" button here, since this isn't a permission the
+// employee can grant themselves (native capture helper missing, AV/EDR
+// blocking capture, a locked/RDP session, etc). Shows the real captured
+// error text so IT has something to act on instead of a generic failure.
+function showMonitoringCaptureFailedModal(errorMessage) {
+  document.getElementById('monitoring-permission-card').innerHTML = `
+    <div class="update-icon force">⚠️</div>
+    <div>
+      <div class="update-title">Screenshot Capture Isn't Working</div>
+      <div class="update-subtitle force">Screen monitoring can't be verified on this device, so you can't clock in yet. Please contact IT with this error:</div>
+    </div>
+    <div id="monitoring-permission-status" class="update-subtitle" style="margin-top:4px">${errorMessage || 'Unknown error'}</div>
+    <div class="update-actions">
+      <button class="btn btn-primary" onclick="retryClockInAfterCaptureFailure()">Try Again</button>
+    </div>
+  `;
+  document.getElementById('monitoring-permission-backdrop').classList.add('active');
+}
+async function retryClockInAfterCaptureFailure() {
+  hideMonitoringPermissionModal();
+  // No local status to re-check here (unlike recheckMonitoringPermission,
+  // which can ask main.js for a cheap OS permission read first) — the only
+  // way to know if capture works now is to attempt clock-in again, which
+  // runs the real capture check itself.
+  await doClock('in');
 }
 async function retryCheckoutAfterReport() {
   const btn = document.querySelector('#report-required-card .btn-primary');

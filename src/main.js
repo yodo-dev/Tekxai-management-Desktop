@@ -709,10 +709,37 @@ ipcMain.handle('clock-in', async () => {
     e.code = 'MONITORING_PERMISSION_UNVERIFIED';
     throw e;
   }
-  reportMonitoringPermissionStatus(permission_status).catch(() => {});
+
+  // getMonitoringPermissionStatus() above only inspects macOS's TCC
+  // permission — on Windows/Linux (NOT_APPLICABLE) there is no OS-level
+  // gate to read, so historically this employee's clock-in went straight
+  // through even when takeScreenshot() had been silently failing on every
+  // interval (screenshot-desktop's native helper missing, AV/EDR blocking
+  // capture, an RDP/locked session, etc — see takeScreenshot()'s own
+  // catch block, which previously only console.error'd locally). A real
+  // capture attempt is the only signal that actually proves screenshot
+  // capture works, on every platform including macOS itself (a 'GRANTED'
+  // TCC status doesn't guarantee the capture call won't still throw for an
+  // unrelated reason) — so run one here, before allowing clock-in, rather
+  // than trusting a platform-specific permission read alone.
+  let capture_error = null;
+  if (permission_status !== 'DENIED' && permission_status !== 'UNKNOWN') {
+    const capture = await verifyScreenshotCaptureWorks();
+    if (!capture.ok) {
+      permission_status = 'CAPTURE_FAILED';
+      capture_error = capture.error;
+    }
+  }
+
+  reportMonitoringPermissionStatus(permission_status, capture_error).catch(() => {});
   if (permission_status === 'DENIED' || permission_status === 'UNKNOWN') {
     const e = new Error('Screen Recording permission is required before you can clock in.');
     e.code = 'MONITORING_PERMISSION_DENIED';
+    throw e;
+  }
+  if (permission_status === 'CAPTURE_FAILED') {
+    const e = new Error(`Screenshot capture isn't working on this device (${capture_error || 'unknown error'}). Please contact IT before clocking in.`);
+    e.code = 'MONITORING_CAPTURE_FAILED';
     throw e;
   }
 
@@ -965,6 +992,25 @@ function getMonitoringPermissionStatus() {
   }
 }
 
+// Cross-platform capture health-check — attempts one real screenshot-
+// desktop capture and discards it. This is the only signal that actually
+// proves screen capture works: Windows/Linux have no OS permission prompt
+// for getMonitoringPermissionStatus() to inspect (always NOT_APPLICABLE),
+// and even macOS's 'GRANTED' TCC status doesn't guarantee the capture call
+// itself won't throw (native helper missing, AV/EDR interference, a
+// locked/RDP session, etc). Intentionally slow-ish (a real capture, not a
+// cheap stat call) — only run at clock-in time, never on the recurring
+// screenshot interval.
+async function verifyScreenshotCaptureWorks() {
+  try {
+    const screenshot = require('screenshot-desktop');
+    await screenshot({ format: 'png' });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
 // macOS only — there is no equivalent deep-link for Windows/Linux since
 // NOT_APPLICABLE never reaches this. Opens System Settings' Screen
 // Recording pane directly; does not and cannot grant the permission
@@ -977,13 +1023,31 @@ function openMonitoringPermissionSettings() {
 ipcMain.handle('monitoring-permission:check', () => getMonitoringPermissionStatus());
 ipcMain.handle('monitoring-permission:open-settings', () => { openMonitoringPermissionSettings(); });
 
+// Proactive, full verification (OS permission read + a real capture
+// attempt) — the same combined check clock-in runs, exposed standalone so
+// the renderer can pop the blocking modal on its own schedule (app
+// startup, periodically while running) instead of only ever discovering a
+// broken setup the moment someone tries to clock in. Reports to the
+// backend exactly like the clock-in path does, so Administration's
+// Permissions table (fe-work admin/monitoring) reflects this too.
+ipcMain.handle('monitoring-permission:verify-full', async () => {
+  let status = getMonitoringPermissionStatus();
+  let capture_error = null;
+  if (status !== 'DENIED' && status !== 'UNKNOWN') {
+    const capture = await verifyScreenshotCaptureWorks();
+    if (!capture.ok) { status = 'CAPTURE_FAILED'; capture_error = capture.error; }
+  }
+  reportMonitoringPermissionStatus(status, capture_error).catch(() => {});
+  return { status, capture_error };
+});
+
 // Best-effort — records this install's last-known permission state on the
 // existing desktop_installations row (same telemetry table reportTelemetry
 // already writes to) so Administration can see who's blocked without
 // needing a second telemetry mechanism. Never blocks/throws into the
 // clock-in flow if the backend call fails; the actual gate is enforced
 // locally above, this is purely the defense-in-depth signal.
-async function reportMonitoringPermissionStatus(status) {
+async function reportMonitoringPermissionStatus(status, capture_error = null) {
   const token = get_token('auth_token');
   if (!token) return;
   const axios = require('axios');
@@ -995,6 +1059,7 @@ async function reportMonitoringPermissionStatus(status) {
       device: os.hostname(),
       channel: UPDATE_CHANNEL,
       monitoring_permission_status: status,
+      monitoring_capture_error: capture_error,
     }, { headers: { Authorization: `Bearer ${t}` } }));
   } catch (_) {}
 }

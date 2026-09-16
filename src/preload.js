@@ -24,6 +24,12 @@ contextBridge.exposeInMainWorld('agent', {
   // that can actually change the answer (the app cannot grant this itself).
   checkMonitoringPermission:            () => ipcRenderer.invoke('monitoring-permission:check'),
   openMonitoringPermissionSettings:     () => ipcRenderer.invoke('monitoring-permission:open-settings'),
+  // Full check (OS permission + a real capture attempt) — returns
+  // { status, capture_error }. Used for the proactive/automatic modal
+  // (app startup, periodic re-check), distinct from the cheap OS-only
+  // checkMonitoringPermission() above used by the modal's own "Check
+  // Permission Again" retry button.
+  verifyMonitoringCaptureFull:          () => ipcRenderer.invoke('monitoring-permission:verify-full'),
 
   // Desktop auto-update — main.js is the sole source of truth for whether an
   // update exists/is mandatory (via be-work's /desktop/latest-version) and
