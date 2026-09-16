@@ -47,3 +47,12 @@ Release notes for the Desktop Release API's `release_notes` field (rendered via 
 
 ## Under the hood
 - Release-process documentation hardened following the v1.2.3 incident: update-path UAT is now called out as a separate, non-substitutable verification step, with explicit manual `aws s3 cp` + CloudFront invalidation steps and staged-rollout guidance.
+
+# TEKxAI Agent 1.3.1
+
+## Fixes
+- **Screenshot capture can now be verified before clock-in on every platform, not just macOS.** The previous Screen Recording permission gate (1.3.0) only ever checked macOS's OS-level permission — Windows and Linux have no equivalent prompt, so an employee on those platforms could clock in and track time even when screenshot capture was silently failing on every interval (a missing native capture helper, security software blocking capture, a locked/remote-desktop session, etc.). The app now attempts a real screenshot capture at clock-in time on every platform; if it fails, clock-in is blocked and the actual error is shown so it can be reported to IT, instead of the failure only ever appearing as a local, unreported console log.
+- **This check now also runs proactively**, once at login/auto-login and periodically (every 15 minutes) while the app is open — a broken setup is surfaced automatically instead of only being discovered the moment someone tries to clock in.
+
+## Under the hood
+- Administration → Monitoring now has a Permissions tab (Super Admin only) listing every employee's device, monitoring status, whether they can currently clock in, and the real captured error for anyone blocked.
