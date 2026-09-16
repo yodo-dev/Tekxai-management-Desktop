@@ -185,6 +185,10 @@ function showDashboard(user) {
   document.getElementById('login-screen').classList.remove('active');
   document.getElementById('dashboard-screen').classList.add('active');
 
+  window.agent.getAppVersion?.()?.then((v) => {
+    document.getElementById('app-version').textContent = v ? `v${v}` : '';
+  }).catch(() => {});
+
   startProactiveMonitoringChecks();
 }
 

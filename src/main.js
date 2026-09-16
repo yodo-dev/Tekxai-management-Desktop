@@ -609,6 +609,8 @@ ipcMain.handle('login', async (_, { email, password }) => {
   return { user: user || payload };
 });
 
+ipcMain.handle('get-app-version', () => app.getVersion());
+
 ipcMain.handle('logout', async () => {
   stopScreenshots();
   // A real logout, not just a local sign-out — revoke the refresh token

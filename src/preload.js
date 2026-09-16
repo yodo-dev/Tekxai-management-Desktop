@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('agent', {
   delStore:      (key)            => ipcRenderer.invoke('del-store', key),
   login:         (creds)          => ipcRenderer.invoke('login', creds),
   logout:        ()               => ipcRenderer.invoke('logout'),
+  getAppVersion: ()               => ipcRenderer.invoke('get-app-version'),
   getToday:      ()               => ipcRenderer.invoke('get-today'),
   clockIn:       ()               => ipcRenderer.invoke('clock-in'),
   clockOut:      (opts)           => ipcRenderer.invoke('clock-out', opts),

@@ -84,6 +84,7 @@ function buildContext({ verifyMonitoringCaptureFull }) {
     onUpdateError: () => {},
     verifyMonitoringCaptureFull: async () => { verifyCallCount++; return verifyMonitoringCaptureFull(); },
     openMonitoringPermissionSettings: () => {},
+    getAppVersion: async () => '1.3.1',
   };
 
   const context = {

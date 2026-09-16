@@ -191,6 +191,11 @@
 
     .ss-count { margin-left: auto; font-size: 10px; color: var(--muted); }
 
+    .app-version {
+      text-align: center; font-size: 10px; color: var(--muted);
+      opacity: 0.6; margin-top: 2px; user-select: none;
+    }
+
     /* ── Update overlay ── */
     .update-backdrop {
       display: none;
@@ -361,6 +366,8 @@
     <button class="btn btn-outline" onclick="window.agent.openDashboard()">🌐 Dashboard</button>
     <button class="btn btn-outline logout-btn" onclick="doLogout()">Sign Out</button>
   </div>
+
+  <div class="app-version" id="app-version"></div>
 </div>
 
 <!-- Update overlay — full-screen backdrop/card, reserved for "Ready to
