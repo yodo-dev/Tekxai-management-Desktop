@@ -73,6 +73,24 @@ module.exports = {
     '!**/build-tmp-napi-v6/**',
     '!**/*.{o,obj,Makefile}',
   ],
+  // screenshot-desktop's Windows capture path (lib/win32/index.js's
+  // copyToTemp()) reads its bundled screenCapture_*.bat/app.manifest via
+  // `__dirname` with a literal `.replace('app.asar', 'app.asar.unpacked')`
+  // — it does NOT read them from inside the asar archive, it requires them
+  // to already exist as real files on disk next to it. Electron-builder's
+  // automatic asar-unpack heuristic only catches native `.node` binaries
+  // (which is why active-win's native module was never affected) — a
+  // plain `.bat` file is invisible to that heuristic, so without this
+  // explicit rule the file is sealed inside asar and every single Windows
+  // install hits `ENOENT ... app.asar.unpacked\...\screenCapture_1.3.2.bat`
+  // the moment it tries to capture a screenshot (100% reproducible, not
+  // per-machine — confirmed by tracing the exact resolution logic, not by
+  // guessing at AV/corruption). macOS/Linux capture paths shell out to the
+  // OS's own screencapture/import binaries and need no bundled file at
+  // all, so this is Windows-only.
+  asarUnpack: [
+    'node_modules/screenshot-desktop/**/*',
+  ],
   publish: {
     provider: 'generic',
     url: 'https://releases.tekxai.services/desktop-app',
