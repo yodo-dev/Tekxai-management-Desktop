@@ -385,7 +385,32 @@ async function startDownload() {
     version: desktopUpdateInfo.latestVersion,
     mustForce: forcedUpdatePending,
   });
-  await autoUpdater.checkForUpdates();
+  const result = await autoUpdater.checkForUpdates();
+  if (!result?.isUpdateAvailable) {
+    // Our own backend (desktopUpdateInfo) says a newer version is published,
+    // but electron-updater's own generic-provider feed file (latest-mac.yml/
+    // latest-linux.yml/latest.yml) hasn't caught up yet — these two are
+    // updated by separate, non-atomic steps (registering the release in the
+    // backend vs. actually building + uploading + CDN-invalidating that
+    // specific platform's artifact), and the gap between them can be
+    // minutes to hours (confirmed: a real ~4-hour macOS notarization delay
+    // produced exactly this gap during the v1.3.2 release). Calling
+    // downloadUpdate() here would always throw electron-updater's own
+    // hardcoded "Please check update first" — it never sets its internal
+    // updateInfoAndProvider when it doesn't think an update exists — which
+    // is not a real failure, just this platform's feed not being ready yet.
+    // Treat it as a quiet, unreported no-op: the next scheduled
+    // checkBackendVersion/reportTelemetry cycle (or a manual retry) succeeds
+    // once the feed catches up, exactly as it already does today. The only
+    // change is not spamming desktop_update_failures with this exact,
+    // always-identical sequence in the meantime — that noise was making
+    // genuine failures harder to spot in the same table (confirmed: one
+    // employee's Linux install, whose feed has never been updated past
+    // 1.3.0, logged 700+ of these over the past month alone).
+    updateAttempt = null;
+    console.warn('[auto-update] backend reports a newer version, but this platform\'s update feed is not ready yet — will retry on the next scheduled check');
+    return;
+  }
   await autoUpdater.downloadUpdate();
 }
 
