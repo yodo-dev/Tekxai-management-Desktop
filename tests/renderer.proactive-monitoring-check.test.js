@@ -143,8 +143,24 @@ test('a CAPTURE_FAILED result pops the capture-failed modal and surfaces the rea
 
   assert.equal(backdropActive(elements), true);
   const html = elements.get('monitoring-permission-card').innerHTML;
-  assert.match(html, /Screenshot Capture Isn't Working/);
+  assert.match(html, /Screen Monitoring Isn't Working/);
   assert.match(html, /screenCapture\.exe ENOENT/, 'the real captured error message must reach the employee, not a generic message');
+  // Employee-facing wording must never contain "screenshot" (v1.3.2) — the
+  // underlying screenshot-desktop package name is an internal identifier
+  // and deliberately exempt, but nothing shown to the employee may use it.
+  assert.doesNotMatch(html, /screenshot/i, 'employee-facing text must not contain the word "screenshot"');
+});
+
+test('a capture_error containing the literal word "screenshot" is sanitized before display (v1.3.2)', async () => {
+  const { context, elements } = buildContext({
+    verifyMonitoringCaptureFull: async () => ({ status: 'CAPTURE_FAILED', capture_error: 'screenshot-desktop: native module failed to load' }),
+  });
+  context.showDashboard({ id: 'u1', first_name: 'Test', last_name: 'User' });
+  await new Promise((r) => setTimeout(r, 0));
+
+  const html = elements.get('monitoring-permission-card').innerHTML;
+  assert.doesNotMatch(html, /screenshot/i, 'a raw library error containing "screenshot" must be sanitized before reaching the employee');
+  assert.match(html, /screen monitoring-desktop: native module failed to load/i, 'the rest of the real error text must still reach the employee, only the word itself is replaced');
 });
 
 test('runProactiveMonitoringCheck() does not stack a second popup on top of one already showing', async () => {

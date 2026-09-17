@@ -767,7 +767,13 @@ ipcMain.handle('clock-in', async () => {
     throw e;
   }
   if (permission_status === 'CAPTURE_FAILED') {
-    const e = new Error(`Screenshot capture isn't working on this device (${capture_error || 'unknown error'}). Please contact IT before clocking in.`);
+    // capture_error is screenshot-desktop's own thrown Error message — its
+    // wording isn't controlled by this app and could contain "screenshot"
+    // itself, so it's sanitized here too (not just in renderer.js's modal),
+    // since this exact string is also what a raw alert()/e.message path
+    // could otherwise surface unsanitized.
+    const safe_capture_error = capture_error ? String(capture_error).replace(/screenshot/gi, 'screen monitoring') : null;
+    const e = new Error(`Screen monitoring isn't working on this device (${safe_capture_error || 'unknown error'}). Please contact IT before clocking in.`);
     e.code = 'MONITORING_CAPTURE_FAILED';
     throw e;
   }

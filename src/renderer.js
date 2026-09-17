@@ -520,7 +520,7 @@ function setSsIndicator(active) {
     label.textContent = 'Monitoring active';
   } else {
     dot.classList.remove('active');
-    label.textContent = 'Screenshots paused';
+    label.textContent = 'Screen monitoring paused';
     document.getElementById('ss-count').textContent = '';
   }
 }
@@ -806,6 +806,18 @@ async function recheckMonitoringPermission() {
   }
 }
 
+// The capture_error text this modal displays originates from the
+// screenshot-desktop npm package's own thrown Error (main.js's
+// verifyScreenshotCaptureWorks) — its wording isn't controlled by this app,
+// so it could plausibly contain the literal word "screenshot" even after
+// every string this app itself writes has been reworded. Case-insensitive
+// so "Screenshot"/"SCREENSHOT" are caught too; only touches what's shown to
+// the employee, never the underlying error object/logs.
+function sanitizeUserFacingError(text) {
+  if (!text) return text;
+  return String(text).replace(/screenshot/gi, 'screen monitoring');
+}
+
 // Reuses the same backdrop/card DOM as the permission modal above — no
 // "Open System Settings" button here, since this isn't a permission the
 // employee can grant themselves (native capture helper missing, AV/EDR
@@ -815,10 +827,10 @@ function showMonitoringCaptureFailedModal(errorMessage) {
   document.getElementById('monitoring-permission-card').innerHTML = `
     <div class="update-icon force">⚠️</div>
     <div>
-      <div class="update-title">Screenshot Capture Isn't Working</div>
+      <div class="update-title">Screen Monitoring Isn't Working</div>
       <div class="update-subtitle force">Screen monitoring can't be verified on this device, so you can't clock in yet. Please contact IT with this error:</div>
     </div>
-    <div id="monitoring-permission-status" class="update-subtitle" style="margin-top:4px">${errorMessage || 'Unknown error'}</div>
+    <div id="monitoring-permission-status" class="update-subtitle" style="margin-top:4px">${sanitizeUserFacingError(errorMessage) || 'Unknown error'}</div>
     <div class="update-actions">
       <button class="btn btn-primary" onclick="retryClockInAfterCaptureFailure()">Try Again</button>
     </div>
