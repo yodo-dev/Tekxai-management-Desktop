@@ -117,9 +117,15 @@ module.exports = {
   afterSign: 'scripts/notarize.js',
   afterAllArtifactBuild: 'scripts/staple-dmg.js',
   linux: {
+    // deb dropped — building it on a macOS host produces a corrupt package
+    // (confirmed: `file` identifies the output as a macOS ar/ranlib static-
+    // library stub, not a real .deb — dpkg-deb-based packaging doesn't
+    // cross-build correctly from macOS). AppImage is a real, working
+    // cross-build target and needs no host-specific packaging tool, so it
+    // stays as the only Linux target until deb building has an actual
+    // Linux host/CI runner behind it.
     target: [
       { target: 'AppImage', arch: ['x64', 'arm64'] },
-      { target: 'deb', arch: ['x64', 'arm64'] },
     ],
     icon: 'assets/icon.png',
     category: 'Utility',
