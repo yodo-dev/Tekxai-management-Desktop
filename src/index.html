@@ -147,6 +147,13 @@
       padding: 4px 10px; border-radius: 8px;
       width: fit-content;
     }
+    .clock-skew-warning {
+      display: none; align-items: center; gap: 5px;
+      font-size: 11px; font-weight: 700; color: var(--orange);
+      background: #fff7ed; border-radius: 6px; padding: 3px 8px;
+      margin-bottom: 8px; width: fit-content;
+    }
+    .clock-skew-warning.visible { display: inline-flex; }
     .status-idle    { background: #f3f4f6; color: var(--muted); }
     .status-active  { background: #dcfce7; color: var(--green); }
     .status-paused  { background: #fff7ed; color: var(--orange); }
@@ -332,6 +339,7 @@
   <!-- Time tracker -->
   <div class="tracker-card">
     <div class="tracker-label">Time Tracker</div>
+    <div class="clock-skew-warning" id="clock-skew-warning">⚠ System clock appears incorrect — timer may be inaccurate</div>
     <div class="tracker-time" id="tracker-time">0h:00m:00s</div>
     <div class="tracker-status status-idle" id="tracker-status">
       <div class="dot"></div>

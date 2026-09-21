@@ -18,6 +18,19 @@ let startEpoch = 0;
 // per-day, not per check-in — the ticker below adds this to the running
 // session's elapsed time instead of starting from zero on every clock-in.
 let priorSeconds = 0;
+// Anchor pair for the ticker — see startTick()/anchorTick() below. The
+// ticker computes elapsed as tickAnchorElapsedSec + (Date.now() -
+// tickAnchorLocalMs), i.e. purely a local-clock-to-itself delta. This is
+// what makes the running display immune to server/local clock skew after
+// the anchor is set: the one place a skewed local clock can still affect
+// the number is the single snapshot computed in computeSessionElapsedSeconds
+// (comparing Date.now() to the server's check_in timestamp) — every tick
+// after that is safe.
+// `var` (not `let`) — same reason as tickInterval/reconcileInterval below:
+// asserted on directly by tests/renderer.clock-skew.test.js via the vm
+// sandbox's global object.
+var tickAnchorLocalMs = 0;
+var tickAnchorElapsedSec = 0;
 // `var` (not `let`) deliberately: these two are asserted on directly by the
 // interval-leak regression test (tests/renderer.reconcile.test.js), which
 // loads this file via Node's vm module — only top-level `var`/function
@@ -65,6 +78,7 @@ let breakSource = null;
     // otherwise it would keep calling refreshToday() against a session
     // the main process already knows is gone.
     stopTick();
+    setClockSkewWarning(false);
     stopProactiveMonitoringChecks();
     showLogin('Your session expired. Please sign in again.');
   });
@@ -300,6 +314,11 @@ async function refreshToday() {
       clockedIn = true; clockedOut = false;
       onBreak = data.entry.status === 'ON_BREAK';
       breakSource = onBreak ? (data.entry.break_source || null) : null;
+      // Anchor BEFORE startTick() so the very first tick (and the
+      // stat-today line set immediately below) both read the freshly
+      // (re)established anchor, not a stale one from a previous session.
+      const elapsedNow = computeSessionElapsedSeconds(checkIn);
+      anchorTick(priorSeconds + elapsedNow);
       setTrackerUI('active');
       startTick();
       setSsIndicator(!onBreak);
@@ -308,8 +327,7 @@ async function refreshToday() {
 
       const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: COMPANY_TIMEZONE });
       document.getElementById('stat-checkin').textContent = checkinTime;
-      // Math.max(0, ...) guards against a skewed/behind local clock (see startTick).
-      const elapsedNow = Math.max(0, Math.floor((Date.now() - startEpoch) / 1000));
+      document.getElementById('tracker-time').textContent = fmtHms(priorSeconds + elapsedNow);
       document.getElementById('stat-today').textContent = fmtDuration(priorSeconds + elapsedNow);
     } else if (data.clocked_in && data.clocked_out) {
       clockedIn = false; clockedOut = true;
@@ -323,6 +341,7 @@ async function refreshToday() {
       // is the only other place that stops it. Without this, the stale
       // interval keeps overwriting the frozen duration below every second.
       stopTick();
+      setClockSkewWarning(false);
       setTrackerUI('done');
       // Same leftover-state issue as stopTick() above: if screenshots were
       // active going into this resync (session was live a moment ago), the
@@ -343,6 +362,7 @@ async function refreshToday() {
       breakSource = null;
       hideIdleBreakModal();
       stopTick();
+      setClockSkewWarning(false);
       setSsIndicator(false);
       setTrackerUI('idle');
     }
@@ -354,6 +374,7 @@ async function refreshToday() {
 function applyClockOutResult(entry) {
   clockedIn = false; clockedOut = true;
   stopTick();
+  setClockSkewWarning(false);
   // entry.duration_sec is only THIS session's length (each check-in/out is
   // its own row) — add the sessions already completed earlier today so the
   // display shows the full daily total, not just the last session.
@@ -382,6 +403,12 @@ async function doClock(action) {
       onBreak = false;
       breakSource = null;
       screenshotCount = 0;
+      // Anchor before startTick() — see the refreshToday() active-session
+      // branch above for why. A fresh clock-in normally has ~0 elapsed, but
+      // this still runs through the same skew check for consistency (and
+      // in case entry.check_in comes back meaningfully different from
+      // "now", e.g. clock resumed a session server-side).
+      anchorTick(priorSeconds + computeSessionElapsedSeconds(startEpoch));
       setTrackerUI('active');
       startTick();
       setSsIndicator(true);
@@ -544,14 +571,46 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 // scratch every call), so redundant calls here are harmless.
 window.addEventListener?.('focus', () => refreshToday());
 
+// Reads the server-issued check-in timestamp against this machine's local
+// clock exactly once (at clock-in or at a resync), rather than on every
+// tick — see the tickAnchor* comment above for why that matters. Also
+// drives the visible clock-skew warning: a small negative tolerance (5s)
+// absorbs normal network/processing latency between the server stamping
+// check_in and this code running, so the warning doesn't fire on every
+// clock-in from jitter alone — only a real, sustained clock problem.
+function computeSessionElapsedSeconds(checkInEpoch) {
+  const raw = Math.floor((Date.now() - checkInEpoch) / 1000);
+  const skewed = raw < -5;
+  setClockSkewWarning(skewed);
+  return skewed ? 0 : Math.max(0, raw);
+}
+
+function setClockSkewWarning(active) {
+  const el = document.getElementById('clock-skew-warning');
+  if (!el) return;
+  if (active) el.classList.add('visible');
+  else el.classList.remove('visible');
+}
+
+// Snapshots "elapsed as of right now" against the local clock so every
+// subsequent tick only ever measures local-time-since-anchor — see the
+// tickAnchor* state comment above.
+function anchorTick(elapsedNowSec) {
+  tickAnchorLocalMs = Date.now();
+  tickAnchorElapsedSec = elapsedNowSec;
+}
+
 function startTick() {
   stopTick();
   tickInterval = setInterval(() => {
-    // Math.max(0, ...) guards against a negative reading if this machine's
-    // system clock is behind the server's (check_in is a server timestamp;
-    // a skewed/misconfigured local clock would otherwise make `now` appear
-    // to be BEFORE check_in and show a nonsensical negative timer).
-    const elapsed = priorSeconds + Math.max(0, Math.floor((Date.now() - startEpoch) / 1000));
+    // Purely a local-clock-to-itself delta (both readings are Date.now(),
+    // taken on this same machine) — unlike the old
+    // `Date.now() - startEpoch` (which compared this machine's clock
+    // directly against the server's check_in timestamp on every tick), a
+    // skewed local clock can no longer pin this at a permanent 0. See
+    // anchorTick()/computeSessionElapsedSeconds() for where the anchor is
+    // (re)established.
+    const elapsed = tickAnchorElapsedSec + Math.max(0, Math.floor((Date.now() - tickAnchorLocalMs) / 1000));
     document.getElementById('tracker-time').textContent = fmtHms(elapsed);
     document.getElementById('stat-today').textContent   = fmtDuration(elapsed);
   }, 1000);
