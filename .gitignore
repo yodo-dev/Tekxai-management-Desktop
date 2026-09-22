@@ -6,3 +6,12 @@ out/
 .env
 .env.*
 !.env.*.example
+
+# code-signing material — must never be committed
+*.pfx
+*.p12
+*.key
+*.cer
+*.crt
+*password*.txt
+signing/
