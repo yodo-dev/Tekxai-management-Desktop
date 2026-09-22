@@ -133,13 +133,26 @@ module.exports = {
   nsis: {
     oneClick: false,
     allowToChangeInstallationDirectory: true,
+    // Required for the certificate-trust step in build/installer.nsh:
+    // writing to the LocalMachine\TrustedPublisher store needs admin
+    // rights, and this is electron-builder's own supported, non-bypass way
+    // to get them — it emits a standard `RequestExecutionLevel admin` in
+    // the generated installer, which shows the normal Windows UAC consent
+    // prompt once at install start. No custom elevation plugin/script, no
+    // UAC weakening. (Side effect, worth knowing: per-machine installs
+    // default to Program Files instead of the previous per-user AppData
+    // location — flagged here since it's a real behavior change, not
+    // hidden in a comment no one reads.)
+    perMachine: true,
     // Custom NSIS include (see build/installer.nsh) that detects a running
     // "TEKxAI Agent.exe" and closes it (gracefully, then forcibly if
     // needed) before install proceeds. This replaces the invalid
     // closeApplication/restartApplication keys attempted in 9c4fc68 and
     // reverted in 0320daf — those are not real electron-builder NSIS
     // options at any version, including current latest. `include` is
-    // electron-builder's actual supported mechanism for this.
+    // electron-builder's actual supported mechanism for this. The same
+    // include now also installs the TekXAI code-signing certificate into
+    // LocalMachine\TrustedPublisher (idempotent — see the file for detail).
     include: 'build/installer.nsh',
   },
 };
