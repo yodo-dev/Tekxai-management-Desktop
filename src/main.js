@@ -90,9 +90,21 @@ let lastAppStart = null;
 // Extract the backend's real message here, in the main process, while
 // err.response.data.message is still available, and throw a plain Error carrying
 // just that string so it survives IPC serialization intact.
+// Network-level failures (DNS resolution, connection refused, timeout — no
+// HTTP response ever came back) previously fell through to err.message,
+// which for axios/Node is a raw technical string like "getaddrinfo ENOTFOUND
+// api.tekxai.services" — confirmed shown verbatim to a real user on the
+// login screen. NETWORK_ERROR_CODES are all the Node error codes covering
+// "couldn't even reach the server" (as opposed to the server responding
+// with an error, which backendMessage below already handles).
+const NETWORK_ERROR_CODES = new Set(['ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'EAI_AGAIN']);
 function toIpcSafeError(err) {
   const backendMessage = err?.response?.data?.message;
-  const safe = new Error(backendMessage || err?.message || 'Request failed');
+  const isNetworkError = !err?.response && (NETWORK_ERROR_CODES.has(err?.code) || err?.message?.includes('Network Error'));
+  const friendlyMessage = isNetworkError
+    ? 'Could not reach the TEKxAI server. Check your internet connection and try again.'
+    : (backendMessage || err?.message || 'Request failed');
+  const safe = new Error(friendlyMessage);
   // Plain Error properties (not just .message) DO survive structured-clone
   // across contextBridge/ipcRenderer.invoke — carry the backend's
   // machine-readable `code` (e.g. REPORT_REQUIRED) through too, so the

@@ -53,6 +53,17 @@ let breakSource = null;
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 (async () => {
+  // Shown on both the login screen (visible before any session exists) and
+  // the dashboard footer — fetched once here rather than only inside
+  // showDashboard(), which left the login screen with no version at all.
+  window.agent.getAppVersion?.()?.then((v) => {
+    const text = v ? `v${v}` : '';
+    const loginEl = document.getElementById('login-app-version');
+    const dashEl = document.getElementById('app-version');
+    if (loginEl) loginEl.textContent = text;
+    if (dashEl) dashEl.textContent = text;
+  }).catch(() => {});
+
   const token = await window.agent.getStore('auth_token');
   const user  = await window.agent.getStore('user');
 
@@ -210,10 +221,6 @@ function showDashboard(user) {
 
   document.getElementById('login-screen').classList.remove('active');
   document.getElementById('dashboard-screen').classList.add('active');
-
-  window.agent.getAppVersion?.()?.then((v) => {
-    document.getElementById('app-version').textContent = v ? `v${v}` : '';
-  }).catch(() => {});
 
   startProactiveMonitoringChecks();
 }
