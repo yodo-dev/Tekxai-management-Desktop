@@ -1210,7 +1210,20 @@ async function verifyScreenshotCaptureWorks() {
     await screenshot({ format: 'png' });
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err?.message || String(err) };
+    // screenshot-desktop shells out to ImageMagick's `import` binary on
+    // Linux (see node_modules/screenshot-desktop/lib/linux/index.js) —
+    // when it's missing, Node's own execFile/spawn error is a bare
+    // "spawn import ENOENT", meaningless to an employee reading it in the
+    // clock-in modal. Translate that one specific, well-understood case
+    // into an actionable message instead of passing the raw error through.
+    const message = err?.message || String(err);
+    if (process.platform === 'linux' && /spawn import ENOENT/i.test(message)) {
+      return {
+        ok: false,
+        error: 'ImageMagick is not installed on this device (required for screen capture on Linux). Ask IT to run: sudo apt install imagemagick (or the equivalent for your distro), then try again.',
+      };
+    }
+    return { ok: false, error: message };
   }
 }
 
