@@ -477,8 +477,16 @@ async function doClock(action) {
       setTrackerUI('idle');
       showMonitoringCaptureFailedModal(e.message);
     } else {
-      setTrackerUI(clockedIn ? 'active' : 'idle');
-      alert(e?.response?.data?.message || e?.message || 'Action failed');
+      // A genuinely expired/invalid session (no refresh token, or the
+      // refresh token itself was rejected) already triggered
+      // onSessionExpired above, which swapped to the login screen — don't
+      // also stack a raw "Invalid or expired token" alert on top of it;
+      // that fallback IS the user-facing response to this failure.
+      const onLoginScreen = document.getElementById('login-screen')?.classList.contains('active');
+      if (!onLoginScreen) {
+        setTrackerUI(clockedIn ? 'active' : 'idle');
+        alert(e?.response?.data?.message || e?.message || 'Action failed');
+      }
     }
   }
 }
@@ -810,6 +818,7 @@ function showReportRequiredModal() {
       <div class="update-subtitle force">You must submit your Daily Report before you can check out.</div>
     </div>
     <div class="update-actions">
+      <button class="btn btn-outline" onclick="hideReportRequiredModal()">Cancel</button>
       <button class="btn btn-outline" onclick="window.agent.openDailyReport()">Open Daily Report</button>
       <button class="btn btn-primary" onclick="retryCheckoutAfterReport()">I've Submitted — Retry Checkout</button>
     </div>

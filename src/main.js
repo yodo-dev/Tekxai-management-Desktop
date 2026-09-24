@@ -128,7 +128,16 @@ function toIpcSafeError(err) {
 // on a 401 before giving up.
 async function performTokenRefresh() {
   const refresh_token = get_token('refresh_token');
-  if (!refresh_token) throw new Error('No refresh token available');
+  if (!refresh_token) {
+    // Tagged (not just message text) so authRequest's catch below can
+    // distinguish this unambiguously from a transient refresh-call failure
+    // (429/5xx/network) — there is genuinely no token to retry with, ever,
+    // so this must always be treated as a real session loss, not preserved
+    // as "maybe transient".
+    const e = new Error('No refresh token available');
+    e.code = 'NO_REFRESH_TOKEN';
+    throw e;
+  }
 
   const axios = require('axios');
   const res = await axios.post(`${API_BASE}/auth/refresh`, { refresh_token });
@@ -176,7 +185,15 @@ async function authRequest(requestFn) {
       // intact so the next attempt (retry, or the next authenticated call)
       // can succeed normally.
       const refresh_status = refreshErr?.response?.status;
-      if (refresh_status === 401 || refresh_status === 403) {
+      // NO_REFRESH_TOKEN is never transient — there is no token stored to
+      // retry with regardless of how many times this is attempted, unlike
+      // a 429/5xx/network failure on the refresh call itself, which might
+      // succeed next time. Previously fell into the "preserve session"
+      // branch below, leaving a real user (confirmed in production) stuck
+      // on the dashboard staring at a raw "Invalid or expired token" IPC
+      // error on every action, with no way back to the login screen short
+      // of manually clicking Sign Out.
+      if (refresh_status === 401 || refresh_status === 403 || refreshErr?.code === 'NO_REFRESH_TOKEN') {
         delete_token('auth_token');
         delete_token('refresh_token');
         store.delete('user');
