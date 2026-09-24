@@ -1204,7 +1204,31 @@ function getMonitoringPermissionStatus() {
 // locked/RDP session, etc). Intentionally slow-ish (a real capture, not a
 // cheap stat call) — only run at clock-in time, never on the recurring
 // screenshot interval.
+// Linux only. screenshot-desktop's capture is X11-only — it shells out to
+// ImageMagick's `import -window root`, which has no concept of a Wayland
+// compositor and fails there every time (Wayland deliberately has no
+// equivalent of X11's "any app can grab the whole screen" model; a
+// compositor-mediated portal, e.g. xdg-desktop-portal + PipeWire, with its
+// own one-time user consent dialog, is the only correct way to capture
+// under Wayland — a real feature this app does not implement yet, not
+// something a config flag can turn on). Reported 2026-09 on Ubuntu, whose
+// default session is Wayland since 22.04: capture ran (ImageMagick present)
+// but failed with "unable to read X window image 'root': Resource
+// temporarily unavailable" — a real X11 protocol error, correctly detected,
+// but confusing to a reader with no ImageMagick/X11 background. Detected
+// upfront via $XDG_SESSION_TYPE so the employee gets a direct explanation
+// and workaround instead of that raw error after a capture attempt.
+function isUnsupportedWaylandSession() {
+  return process.platform === 'linux' && process.env.XDG_SESSION_TYPE === 'wayland';
+}
+
 async function verifyScreenshotCaptureWorks() {
+  if (isUnsupportedWaylandSession()) {
+    return {
+      ok: false,
+      error: 'Screen monitoring is not yet supported on Wayland (this device\'s current session type). Switch to an X11/Xorg session from your login screen\'s session-type picker, then try again — ask IT if you don\'t see that option.',
+    };
+  }
   try {
     const screenshot = require('screenshot-desktop');
     await screenshot({ format: 'png' });
@@ -1221,6 +1245,16 @@ async function verifyScreenshotCaptureWorks() {
       return {
         ok: false,
         error: 'ImageMagick is not installed on this device (required for screen capture on Linux). Ask IT to run: sudo apt install imagemagick (or the equivalent for your distro), then try again.',
+      };
+    }
+    // A second, narrower Wayland signal — some Wayland sessions still
+    // report $XDG_SESSION_TYPE unreliably (a stale/wrapped launcher
+    // environment), so isUnsupportedWaylandSession() above can miss it;
+    // ImageMagick's own X11 failure text is the fallback tell.
+    if (process.platform === 'linux' && /unable to read X window image/i.test(message)) {
+      return {
+        ok: false,
+        error: 'Screen monitoring failed because this session has no X11 display to capture (likely Wayland). Switch to an X11/Xorg session from your login screen, then try again — ask IT if you don\'t see that option.',
       };
     }
     return { ok: false, error: message };
