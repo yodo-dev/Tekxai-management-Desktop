@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "electron .",
-    "build:win": "electron-builder --win --config electron-builder.config.js && node scripts/generate-metadata.js",
+    "build:win": "electron-builder --win --config electron-builder.config.js && node scripts/verify-win-signature.js && node scripts/generate-metadata.js",
+    "build:win:unsigned": "TEKXAI_ALLOW_UNSIGNED_WIN=1 electron-builder --win --config electron-builder.config.js && node scripts/generate-metadata.js",
+    "verify:win-sign": "node scripts/verify-win-signature.js",
     "build:mac": "electron-builder --mac --config electron-builder.config.js && node scripts/sync-update-yml.js && node scripts/generate-metadata.js",
     "build:linux": "electron-builder --linux --config electron-builder.config.js && node scripts/generate-metadata.js"
   },

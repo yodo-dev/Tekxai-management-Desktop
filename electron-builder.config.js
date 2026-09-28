@@ -52,15 +52,24 @@ function resolveWinSigning() {
     return { certificateSha1: process.env.WIN_CERT_SHA1 };
   }
 
-  // Nothing configured — build proceeds unsigned, same as today. Warn
-  // loudly rather than fail silently, mirroring scripts/notarize.js's own
-  // "skip with a warning" pattern for the equivalent macOS gap.
-  console.warn(
-    '[build] No Windows code-signing configured (AZURE_SIGNING_*, WIN_CSC_LINK/CSC_LINK, or ' +
-    'WIN_CERT_SUBJECT_NAME/WIN_CERT_SHA1 env vars not set) — this Windows build will be UNSIGNED. ' +
-    'See docs/CODE_SIGNING.md before a real company-wide release.'
+  // Nothing configured.
+  // Release builds MUST be signed — unsigned Windows artifacts are how
+  // 1.3.5 shipped without Authenticode and triggered Smart App Control /
+  // Unknown Publisher failures. Opt out explicitly with
+  // TEKXAI_ALLOW_UNSIGNED_WIN=1 (npm run build:win:unsigned only).
+  if (process.env.TEKXAI_ALLOW_UNSIGNED_WIN === '1') {
+    console.warn(
+      '[build] TEKXAI_ALLOW_UNSIGNED_WIN=1 — producing an UNSIGNED Windows build (dev/local only). ' +
+      'Do not publish this artifact to releases.tekxai.services.'
+    );
+    return {};
+  }
+
+  throw new Error(
+    '[build] No Windows code-signing configured. Set WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD ' +
+    '(or AZURE_SIGNING_* / WIN_CERT_SUBJECT_NAME / WIN_CERT_SHA1) before npm run build:win. ' +
+    'For a local unsigned experiment only: npm run build:win:unsigned. See docs/CODE_SIGNING.md.'
   );
-  return {};
 }
 
 module.exports = {
