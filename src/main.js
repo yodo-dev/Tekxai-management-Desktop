@@ -73,11 +73,26 @@ const DASHBOARD_URL = 'https://tekxai.services/employee';
 const SCREENSHOT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const HEARTBEAT_INTERVAL_MS = 45 * 1000; // ~45s while clocked in
 
+const {
+  createInFlightGuard,
+  runExclusive,
+  withTimeout,
+  SCREENSHOT_API_TIMEOUT_MS,
+  SCREENSHOT_UPLOAD_TIMEOUT_MS,
+  APP_USAGE_ACTIVE_WIN_TIMEOUT_MS,
+  APP_USAGE_API_TIMEOUT_MS,
+} = require('./monitoring-guards');
+
 let mainWindow = null;
 let screenshotTimer = null;
 let appUsageTimer = null;
 let heartbeatTimer = null;
 let sessionId = null;
+
+// At most one screenshot / app-usage cycle at a time (no queue). Prevents
+// hung network/native work from stacking PNG Buffers or helper processes.
+const screenshotInFlight = createInFlightGuard('screenshot');
+const appUsageInFlight = createInFlightGuard('app-usage');
 
 // App usage tracking state
 let lastAppName = null;
@@ -1393,93 +1408,122 @@ function stopAppUsage() {
 
 async function pollAppUsage(token) {
   if (!sessionId) return;
-  try {
-    const activeWin = require('active-win');
-    const win = await activeWin();
-    if (!win) return;
+  await runExclusive(
+    appUsageInFlight,
+    async () => {
+      try {
+        const activeWin = require('active-win');
+        const win = await withTimeout(
+          activeWin(),
+          APP_USAGE_ACTIVE_WIN_TIMEOUT_MS,
+          `active-win timed out after ${APP_USAGE_ACTIVE_WIN_TIMEOUT_MS}ms`
+        );
+        if (!win) return;
 
-    const appName = win.owner?.name || win.title || 'Unknown';
-    const windowTitle = win.title || '';
-    const url = win.url || null; // populated for browsers via active-win
+        const appName = win.owner?.name || win.title || 'Unknown';
+        const windowTitle = win.title || '';
+        const url = win.url || null; // populated for browsers via active-win
 
-    const now = Date.now();
+        const now = Date.now();
 
-    // If same app/window, just accumulate — don't log yet
-    if (appName === lastAppName && windowTitle === lastWindowTitle) return;
+        // If same app/window, just accumulate — don't log yet
+        if (appName === lastAppName && windowTitle === lastWindowTitle) return;
 
-    // App switched — log the previous one
-    if (lastAppName && lastAppStart) {
-      const duration = Math.round((now - lastAppStart) / 1000);
-      if (duration >= 5) { // ignore blips under 5s
-        const axios = require('axios');
-        await axios.post(`${API_BASE}/monitoring/app-usage`, {
-          session_id: sessionId,
-          app_name: lastAppName,
-          window_title: lastWindowTitle,
-          url: null,
-          duration_seconds: duration,
-          captured_at: new Date(lastAppStart).toISOString(),
-        }, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+        // App switched — log the previous one
+        if (lastAppName && lastAppStart) {
+          const duration = Math.round((now - lastAppStart) / 1000);
+          if (duration >= 5) { // ignore blips under 5s
+            const axios = require('axios');
+            await axios.post(`${API_BASE}/monitoring/app-usage`, {
+              session_id: sessionId,
+              app_name: lastAppName,
+              window_title: lastWindowTitle,
+              url: null,
+              duration_seconds: duration,
+              captured_at: new Date(lastAppStart).toISOString(),
+            }, { headers: { Authorization: `Bearer ${token}` }, timeout: APP_USAGE_API_TIMEOUT_MS }).catch(() => {});
+          }
+        }
+
+        lastAppName = appName;
+        lastWindowTitle = windowTitle;
+        lastAppStart = now;
+      } catch (err) {
+        console.error('[app-usage]', err.message);
       }
-    }
-
-    lastAppName = appName;
-    lastWindowTitle = windowTitle;
-    lastAppStart = now;
-  } catch (_) {}
+    },
+    () => console.log('[app-usage] skipped because previous poll is still in progress')
+  );
 }
 
 async function takeScreenshot(token) {
-  try {
-    // Try to recover sessionId if missing
-    if (!sessionId) {
-      const axios = require('axios');
+  await runExclusive(
+    screenshotInFlight,
+    async () => {
+      // Keep the PNG Buffer in a local binding only; null it in finally so a
+      // hung request path cannot leave it reachable on this closure.
+      let img = null;
       try {
-        const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
-          agent_version: app.getVersion(),
-          os_platform: process.platform,
-        }, { headers: { Authorization: `Bearer ${token}` } });
-        sessionId = sessRes.data?.payload?.id;
-      } catch (_) {}
-    }
+        // Try to recover sessionId if missing
+        if (!sessionId) {
+          const axios = require('axios');
+          try {
+            const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
+              agent_version: app.getVersion(),
+              os_platform: process.platform,
+            }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
+            sessionId = sessRes.data?.payload?.id;
+          } catch (_) {}
+        }
 
-    const screenshot = require('screenshot-desktop');
-    const axios = require('axios');
+        const screenshot = require('screenshot-desktop');
+        const axios = require('axios');
 
-    const img = await screenshot({ format: 'png' });
-    const key = `screenshots/${store.get('user')?.id || 'unknown'}/${Date.now()}.png`;
+        img = await screenshot({ format: 'png' });
+        const key = `screenshots/${store.get('user')?.id || 'unknown'}/${Date.now()}.png`;
 
-    // Get presigned upload URL from backend
-    const fileName = `${Date.now()}.png`;
-    let fileKey = key;
-    let fileUrl = null;
+        // Get presigned upload URL from backend
+        const fileName = `${Date.now()}.png`;
+        let fileKey = key;
+        let fileUrl = null;
 
-    try {
-      const presignRes = await axios.post(`${API_BASE}/storage/presign`, {
-        file_name: fileName,
-        mime_type: 'image/png',
-        entity_type: 'screenshot',
-      }, { headers: { Authorization: `Bearer ${token}` } });
+        try {
+          const presignRes = await axios.post(`${API_BASE}/storage/presign`, {
+            file_name: fileName,
+            mime_type: 'image/png',
+            entity_type: 'screenshot',
+          }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
 
-      const uploadUrl = presignRes.data?.payload?.upload_url;
-      fileKey = presignRes.data?.payload?.file_key || key;
+          const uploadUrl = presignRes.data?.payload?.upload_url;
+          fileKey = presignRes.data?.payload?.file_key || key;
 
-      if (uploadUrl && !uploadUrl.includes('localhost')) {
-        await axios.put(uploadUrl, img, { headers: { 'Content-Type': 'image/png' } });
-        fileUrl = uploadUrl.split('?')[0];
+          if (uploadUrl && !uploadUrl.includes('localhost')) {
+            await axios.put(uploadUrl, img, {
+              headers: { 'Content-Type': 'image/png' },
+              timeout: SCREENSHOT_UPLOAD_TIMEOUT_MS,
+              maxBodyLength: Infinity,
+              maxContentLength: Infinity,
+            });
+            fileUrl = uploadUrl.split('?')[0];
+          }
+        } catch (_) {}
+
+        // Record in backend (with or without S3 URL). Do NOT base64-encode the
+        // full PNG for a fallback stub — that briefly doubles memory on Retina.
+        await axios.post(`${API_BASE}/monitoring/screenshot`, {
+          session_id: sessionId,
+          file_key: fileKey,
+          file_url: fileUrl || 'data:image/png;base64,',
+          captured_at: new Date().toISOString(),
+        }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
+
+        mainWindow?.webContents.send('screenshot-taken');
+      } catch (err) {
+        console.error('[screenshot]', err.message);
+      } finally {
+        img = null;
       }
-    } catch (_) {}
-
-    // Record in backend (with or without S3 URL)
-    await axios.post(`${API_BASE}/monitoring/screenshot`, {
-      session_id: sessionId,
-      file_key: fileKey,
-      file_url: fileUrl || `data:image/png;base64,${img.toString('base64').slice(0, 100)}`,
-      captured_at: new Date().toISOString(),
-    }, { headers: { Authorization: `Bearer ${token}` } });
-
-    mainWindow?.webContents.send('screenshot-taken');
-  } catch (err) {
-    console.error('[screenshot]', err.message);
-  }
+    },
+    () => console.log('[screenshot] skipped because previous capture is still in progress')
+  );
 }
