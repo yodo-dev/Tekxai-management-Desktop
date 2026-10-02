@@ -169,6 +169,39 @@
     .btn-orange { background: #ea580c; color: #fff; border: none; }
     .btn-orange:hover { background: #c2410c; }
 
+    /* Optional Hubstaff-style project/task attribution before clock-in */
+    .attribution-pickers {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .attribution-pickers.hidden { display: none; }
+    .attribution-pickers .form-group { width: 100%; }
+    .attribution-pickers select {
+      width: 100%; height: 40px; padding: 0 12px;
+      border: 1.5px solid var(--border); border-radius: 10px;
+      font-size: 13px; outline: none; background: var(--card);
+      color: var(--text); cursor: pointer;
+      -webkit-app-region: no-drag;
+    }
+    .attribution-pickers select:focus { border-color: var(--primary); }
+    .attribution-pickers select:disabled {
+      opacity: .55; cursor: not-allowed; background: var(--bg);
+    }
+    .attribution-active {
+      display: none;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      line-height: 1.35;
+      padding: 8px 10px;
+      background: #f8fafc;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .attribution-active.visible { display: block; }
+    .attribution-active strong { color: var(--text); font-weight: 700; }
+
     .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .stat-card {
       background: var(--card); border-radius: 14px;
@@ -346,6 +379,21 @@
       <div class="dot"></div>
       <span id="status-text">Not clocked in</span>
     </div>
+    <div class="attribution-pickers" id="attribution-pickers">
+      <div class="form-group">
+        <label for="clock-project">Project (optional)</label>
+        <select id="clock-project">
+          <option value="">None</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="clock-task">Task (optional)</label>
+        <select id="clock-task" disabled>
+          <option value="">None</option>
+        </select>
+      </div>
+    </div>
+    <div class="attribution-active" id="attribution-active"></div>
     <div class="tracker-actions" id="tracker-actions">
       <button class="btn btn-green" id="btn-clock-in" onclick="doClock('in')">▶ Clock In</button>
     </div>

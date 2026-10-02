@@ -49,6 +49,166 @@ let onBreak = false;
 // modal below; a MANUAL break keeps using the existing inline Resume
 // button in the tracker actions row (setTrackerUI), unchanged.
 let breakSource = null;
+// Optional project/task on the currently open session (from today/clock-in).
+let activeAttribution = null;
+
+const ATTR_LS_PROJECT = 'tekxai_clock_last_project_id';
+const ATTR_LS_TASK = 'tekxai_clock_last_task_id';
+
+function readLastAttribution() {
+  try {
+    return {
+      project_id: localStorage.getItem(ATTR_LS_PROJECT) || '',
+      task_id: localStorage.getItem(ATTR_LS_TASK) || '',
+    };
+  } catch (_) {
+    return { project_id: '', task_id: '' };
+  }
+}
+
+function persistLastAttribution(project_id, task_id) {
+  try {
+    if (project_id) localStorage.setItem(ATTR_LS_PROJECT, project_id);
+    else localStorage.removeItem(ATTR_LS_PROJECT);
+    if (task_id) localStorage.setItem(ATTR_LS_TASK, task_id);
+    else localStorage.removeItem(ATTR_LS_TASK);
+  } catch (_) { /* ignore quota / private mode */ }
+}
+
+function getSelectedAttribution() {
+  const project_id = document.getElementById('clock-project')?.value || '';
+  const task_id = document.getElementById('clock-task')?.value || '';
+  return {
+    project_id: project_id || undefined,
+    task_id: task_id || undefined,
+  };
+}
+
+function setAttributionPickersVisible(visible) {
+  const el = document.getElementById('attribution-pickers');
+  if (!el?.classList) return;
+  if (visible) el.classList.remove('hidden');
+  else el.classList.add('hidden');
+}
+
+function renderActiveAttribution(entry) {
+  const el = document.getElementById('attribution-active');
+  if (!el) return;
+  const project = entry?.project;
+  const task = entry?.task;
+  activeAttribution = project || task ? { project, task } : null;
+  if (!activeAttribution) {
+    el.classList.remove('visible');
+    el.textContent = '';
+    return;
+  }
+  const projectTitle = project?.title || 'Untitled project';
+  const taskTitle = task?.title;
+  el.innerHTML = taskTitle
+    ? `Working on <strong>${escapeHtml(projectTitle)}</strong> · ${escapeHtml(taskTitle)}`
+    : `Working on <strong>${escapeHtml(projectTitle)}</strong>`;
+  el.classList.add('visible');
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function clearActiveAttribution() {
+  activeAttribution = null;
+  const el = document.getElementById('attribution-active');
+  if (el) {
+    el.classList.remove('visible');
+    el.textContent = '';
+  }
+}
+
+async function loadAttributionProjects() {
+  const projectSel = document.getElementById('clock-project');
+  const taskSel = document.getElementById('clock-task');
+  if (!projectSel || !taskSel) return;
+  if (typeof window.agent?.getMyProjects !== 'function') return;
+
+  const last = readLastAttribution();
+  try {
+    const projects = await window.agent.getMyProjects();
+    projectSel.innerHTML = '<option value="">None</option>';
+    for (const p of projects || []) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.title || 'Untitled project';
+      if (typeof projectSel.appendChild === 'function') projectSel.appendChild(opt);
+    }
+    const options = projectSel.options ? [...projectSel.options] : [];
+    if (last.project_id && options.some((o) => o.value === last.project_id)) {
+      projectSel.value = last.project_id;
+      await loadAttributionTasks(last.project_id, last.task_id);
+    } else {
+      taskSel.innerHTML = '<option value="">None</option>';
+      taskSel.disabled = true;
+    }
+  } catch (err) {
+    console.warn('[attribution] failed to load projects', err?.message || err);
+  }
+}
+
+async function loadAttributionTasks(projectId, preferredTaskId) {
+  const taskSel = document.getElementById('clock-task');
+  if (!taskSel) return;
+  if (!projectId) {
+    taskSel.innerHTML = '<option value="">None</option>';
+    taskSel.disabled = true;
+    return;
+  }
+  if (typeof window.agent?.getProjectTasks !== 'function') {
+    taskSel.innerHTML = '<option value="">None</option>';
+    taskSel.disabled = false;
+    return;
+  }
+  taskSel.disabled = true;
+  taskSel.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const tasks = await window.agent.getProjectTasks(projectId);
+    taskSel.innerHTML = '<option value="">None</option>';
+    for (const t of tasks || []) {
+      const opt = document.createElement('option');
+      opt.value = t.id;
+      opt.textContent = t.title || 'Untitled task';
+      if (typeof taskSel.appendChild === 'function') taskSel.appendChild(opt);
+    }
+    taskSel.disabled = false;
+    const prefer = preferredTaskId || '';
+    const options = taskSel.options ? [...taskSel.options] : [];
+    if (prefer && options.some((o) => o.value === prefer)) {
+      taskSel.value = prefer;
+    }
+  } catch (err) {
+    console.warn('[attribution] failed to load tasks', err?.message || err);
+    taskSel.innerHTML = '<option value="">None</option>';
+    taskSel.disabled = false;
+  }
+}
+
+function wireAttributionPickers() {
+  const projectSel = document.getElementById('clock-project');
+  const taskSel = document.getElementById('clock-task');
+  if (!projectSel) return;
+  if (!projectSel.dataset) projectSel.dataset = {};
+  if (projectSel.dataset.wired === '1') return;
+  projectSel.dataset.wired = '1';
+  projectSel.addEventListener?.('change', async () => {
+    const projectId = projectSel.value || '';
+    persistLastAttribution(projectId, '');
+    await loadAttributionTasks(projectId, '');
+  });
+  taskSel?.addEventListener?.('change', () => {
+    persistLastAttribution(projectSel.value || '', taskSel.value || '');
+  });
+}
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
@@ -222,6 +382,9 @@ function showDashboard(user) {
   document.getElementById('login-screen').classList.remove('active');
   document.getElementById('dashboard-screen').classList.add('active');
 
+  wireAttributionPickers();
+  loadAttributionProjects().catch(() => {});
+
   startProactiveMonitoringChecks();
 }
 
@@ -278,6 +441,7 @@ async function runProactiveMonitoringCheck() {
 //
 //   clocked_in: boolean
 //   clocked_out: boolean
+//   server_now: ISO string                                  // authoritative server instant
 //   entry: null                                              // never clocked in today
 //        | { check_in, check_out: null, prior_seconds, status }   // open session
 //        | { check_in, check_out, duration_seconds,
@@ -290,6 +454,8 @@ async function runProactiveMonitoringCheck() {
 // silently rendering "0h 0m" — matching the exact bug this file was fixed
 // for (a prior_seconds/duration_seconds field-name mismatch went unnoticed
 // for a full release because refreshToday()'s catch swallowed it silently).
+// `server_now` is preferred (not required) so older backends still load;
+// without it, elapsed falls back to local Date.now() (vulnerable to ahead skew).
 function assertTodayContract(data) {
   if (!data.entry) return; // null entry is a valid, documented shape
   const missingCheckIn = data.clocked_in && !data.clocked_out && typeof data.entry.check_in !== 'string';
@@ -324,13 +490,16 @@ async function refreshToday() {
       // Anchor BEFORE startTick() so the very first tick (and the
       // stat-today line set immediately below) both read the freshly
       // (re)established anchor, not a stale one from a previous session.
-      const elapsedNow = computeSessionElapsedSeconds(checkIn);
+      // Prefer server_now so a PC clock ahead of reality (e.g. +12h) cannot
+      // inflate the one-shot snapshot that seeds the ticker.
+      const elapsedNow = computeSessionElapsedSeconds(checkIn, data.server_now);
       anchorTick(priorSeconds + elapsedNow);
       setTrackerUI('active');
       startTick();
       setSsIndicator(!onBreak);
       if (onBreak && breakSource === 'IDLE') maybeShowIdleBreakModal();
       else hideIdleBreakModal();
+      renderActiveAttribution(data.entry);
 
       const checkinTime = new Date(data.entry.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: COMPANY_TIMEZONE });
       document.getElementById('stat-checkin').textContent = checkinTime;
@@ -341,6 +510,7 @@ async function refreshToday() {
       priorSeconds = 0;
       breakSource = null;
       hideIdleBreakModal();
+      clearActiveAttribution();
       // A tickInterval from a previously-active session (restored earlier by
       // the branch above) may still be running — e.g. the backend's own
       // auto-checkout job closed this session before we found out, so we
@@ -368,6 +538,7 @@ async function refreshToday() {
       priorSeconds = 0;
       breakSource = null;
       hideIdleBreakModal();
+      clearActiveAttribution();
       stopTick();
       setClockSkewWarning(false);
       setSsIndicator(false);
@@ -382,6 +553,7 @@ function applyClockOutResult(entry) {
   clockedIn = false; clockedOut = true;
   stopTick();
   setClockSkewWarning(false);
+  clearActiveAttribution();
   // entry.duration_sec is only THIS session's length (each check-in/out is
   // its own row) — add the sessions already completed earlier today so the
   // display shows the full daily total, not just the last session.
@@ -401,7 +573,9 @@ async function doClock(action) {
   try {
     if (action === 'in') {
       actRow.innerHTML = '<button class="btn btn-outline" disabled>Clocking in…</button>';
-      const entry = await window.agent.clockIn();
+      const attribution = getSelectedAttribution();
+      persistLastAttribution(attribution.project_id || '', attribution.task_id || '');
+      const entry = await window.agent.clockIn(attribution);
       startEpoch = new Date(entry.check_in || Date.now()).getTime();
       // Resume today's accumulated total (earlier completed sessions today)
       // instead of restarting the timer from zero on a second check-in.
@@ -414,9 +588,11 @@ async function doClock(action) {
       // branch above for why. A fresh clock-in normally has ~0 elapsed, but
       // this still runs through the same skew check for consistency (and
       // in case entry.check_in comes back meaningfully different from
-      // "now", e.g. clock resumed a session server-side).
-      anchorTick(priorSeconds + computeSessionElapsedSeconds(startEpoch));
+      // "now", e.g. clock resumed a session server-side). server_now is
+      // merged onto the entry by main.js from GET /timesheet/today.
+      anchorTick(priorSeconds + computeSessionElapsedSeconds(startEpoch, entry.server_now));
       setTrackerUI('active');
+      renderActiveAttribution(entry);
       startTick();
       setSsIndicator(true);
       const checkinTime = new Date(startEpoch).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: COMPANY_TIMEZONE });
@@ -534,8 +710,11 @@ function setTrackerUI(state) {
     statusEl.classList.add('status-idle');
     textEl.textContent = 'Not clocked in';
     onBreak = false;
+    setAttributionPickersVisible(true);
+    clearActiveAttribution();
     actRow.innerHTML = '<button class="btn btn-green" onclick="doClock(\'in\')">▶ Clock In</button>';
   } else if (state === 'active') {
+    setAttributionPickersVisible(false);
     if (onBreak) {
       statusEl.classList.add('status-break');
       textEl.textContent = 'On break';
@@ -550,6 +729,8 @@ function setTrackerUI(state) {
   } else if (state === 'done') {
     statusEl.classList.add('status-idle');
     textEl.textContent = 'Clocked out for today';
+    setAttributionPickersVisible(true);
+    clearActiveAttribution();
     actRow.innerHTML = '<button class="btn btn-green" onclick="doClock(\'in\')">▶ Clock In Again</button>';
   }
 }
@@ -586,18 +767,36 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 // scratch every call), so redundant calls here are harmless.
 window.addEventListener?.('focus', () => refreshToday());
 
-// Reads the server-issued check-in timestamp against this machine's local
-// clock exactly once (at clock-in or at a resync), rather than on every
-// tick — see the tickAnchor* comment above for why that matters. Also
-// drives the visible clock-skew warning: a small negative tolerance (5s)
-// absorbs normal network/processing latency between the server stamping
-// check_in and this code running, so the warning doesn't fire on every
-// clock-in from jitter alone — only a real, sustained clock problem.
-function computeSessionElapsedSeconds(checkInEpoch) {
-  const raw = Math.floor((Date.now() - checkInEpoch) / 1000);
-  const skewed = raw < -5;
+// How far local Date.now() may diverge from server_now before we treat the
+// OS clock as wrong. 60s absorbs NTP/network jitter while still catching
+// the class of failure Ali Umais hit (+12h ahead) — and the older "clock
+// behind" case that pins the timer at 0.
+const CLOCK_SKEW_TOLERANCE_SEC = 60;
+
+// Reads elapsed once (at clock-in or resync) against an authoritative
+// "now", then the ticker advances via local-to-local deltas — see the
+// tickAnchor* comment above. Prefer server_now (from GET /timesheet/today)
+// over Date.now(): a PC clock ahead of reality inflates Date.now()-check_in
+// by exactly that skew, while check_in itself still displays correctly
+// (formatted from the server string in Asia/Karachi). Without server_now
+// (older backend), fall back to local Date.now() and the legacy behind-
+// only clamp so we do not regress on unupgraded servers.
+function computeSessionElapsedSeconds(checkInEpoch, serverNowIso) {
+  const localNowMs = Date.now();
+  const serverNowMs = serverNowIso ? new Date(serverNowIso).getTime() : NaN;
+  const hasServerNow = Number.isFinite(serverNowMs);
+  const referenceNowMs = hasServerNow ? serverNowMs : localNowMs;
+  const raw = Math.floor((referenceNowMs - checkInEpoch) / 1000);
+  const localVsServerSec = hasServerNow
+    ? Math.floor((localNowMs - serverNowMs) / 1000)
+    : null;
+  // Behind (legacy): check_in looks like the future vs local clock.
+  // Ahead/behind vs server_now: |local - server| beyond tolerance.
+  const skewedBehindLegacy = !hasServerNow && raw < -5;
+  const skewedVsServer = hasServerNow && Math.abs(localVsServerSec) > CLOCK_SKEW_TOLERANCE_SEC;
+  const skewed = skewedBehindLegacy || skewedVsServer;
   setClockSkewWarning(skewed);
-  return skewed ? 0 : Math.max(0, raw);
+  return Math.max(0, raw);
 }
 
 function setClockSkewWarning(active) {

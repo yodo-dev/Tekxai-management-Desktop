@@ -96,10 +96,14 @@ function buildContext(agentOverrides) {
     alert: () => {},
     setInterval: (...args) => setInterval(...args).unref(),
     clearInterval,
+    // computeSessionElapsedSeconds posts a debug ingest; tests must not
+    // fail if the local debug server is down.
+    fetch: async () => ({ ok: true }),
     Date,
     Math,
     JSON,
     String,
+    Number,
   };
   vm.createContext(context);
   const code = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
@@ -110,9 +114,16 @@ function buildContext(agentOverrides) {
 function trackerTime(document) { return document.getElementById('tracker-time').textContent; }
 function skewWarningVisible(document) { return document.getElementById('clock-skew-warning').classList.contains('visible'); }
 
+function parseHms(text) {
+  const m = /^(\d+)h:(\d{2})m:(\d{2})s$/.exec(text);
+  assert.ok(m, `expected h:mm:ss got ${text}`);
+  return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+}
+
 // A session whose check_in, per THIS machine's clock, appears to be 10
 // minutes in the future — the same shape a genuinely behind-by-10-minutes
-// local clock produces against a correct server timestamp.
+// local clock produces against a correct server timestamp. No server_now
+// → legacy path (clamp elapsed to 0 + warn).
 function skewedActiveTodayFixture() {
   const checkIn = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   return { clocked_in: true, clocked_out: false, entry: { check_in: checkIn, prior_seconds: 0, status: 'ACTIVE' } };
@@ -120,7 +131,32 @@ function skewedActiveTodayFixture() {
 
 function normalActiveTodayFixture() {
   const checkIn = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-  return { clocked_in: true, clocked_out: false, entry: { check_in: checkIn, prior_seconds: 3600, status: 'ACTIVE' } };
+  const server_now = new Date().toISOString();
+  return {
+    clocked_in: true,
+    clocked_out: false,
+    server_now,
+    entry: { check_in: checkIn, prior_seconds: 3600, status: 'ACTIVE' },
+  };
+}
+
+// Local clock 12h ahead of reality (Ali Umais 2026-10-02). In the test
+// harness Date.now() IS the "wrong" local clock; server_now is stamped
+// 12h earlier so elapsed must come from server_now - check_in (~10m),
+// not Date.now() - check_in (~12h10m).
+function clockAhead12hFixture() {
+  const REAL_ELAPSED_MS = 10 * 60 * 1000;
+  const AHEAD_MS = 12 * 60 * 60 * 1000;
+  const localNow = Date.now();
+  const serverNow = localNow - AHEAD_MS;
+  const checkIn = new Date(serverNow - REAL_ELAPSED_MS).toISOString();
+  return {
+    clocked_in: true,
+    clocked_out: false,
+    server_now: new Date(serverNow).toISOString(),
+    entry: { check_in: checkIn, prior_seconds: 32298, status: 'ACTIVE' },
+    _meta: { REAL_ELAPSED_MS, AHEAD_MS },
+  };
 }
 
 test('skewed local clock: timer shows 0 once (not forever) and the warning becomes visible', async () => {
@@ -191,4 +227,20 @@ test('going idle (never clocked in / force-closed) clears the skew warning', asy
   nextToday = { clocked_in: false, clocked_out: false, entry: null };
   await context.refreshToday();
   assert.equal(skewWarningVisible(document), false);
+});
+
+test('local clock 12h ahead: timer uses server_now (not inflated) and shows skew warning', async () => {
+  const fixture = clockAhead12hFixture();
+  const { context, document } = buildContext({ getToday: async () => fixture });
+
+  await context.refreshToday();
+
+  const shown = parseHms(trackerTime(document));
+  const expected = fixture.entry.prior_seconds + Math.floor(fixture._meta.REAL_ELAPSED_MS / 1000);
+  // Allow a couple seconds of test runtime drift.
+  assert.ok(Math.abs(shown - expected) <= 2, `expected ~${expected}s got ${shown}s (must not include +12h)`);
+  assert.ok(shown < fixture.entry.prior_seconds + 3600, 'must not be inflated by hours of clock skew');
+  assert.equal(skewWarningVisible(document), true, 'clock-ahead must surface the skew warning');
+
+  context.stopTick();
 });

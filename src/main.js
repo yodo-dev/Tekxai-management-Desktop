@@ -1,8 +1,18 @@
-const { app, BrowserWindow, ipcMain, shell, systemPreferences, safeStorage, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, systemPreferences, safeStorage, powerMonitor, desktopCapturer, screen } = require('electron');
 const path = require('path');
 const os = require('os');
 const Store = require('electron-store');
 const { autoUpdater } = require('electron-updater');
+
+// Wayland screen capture (see the "Wayland screenshot capture" section
+// further down) goes through Chromium's own PipeWire/xdg-desktop-portal
+// integration via desktopCapturer — not screenshot-desktop, which is
+// X11-only. This switch must be set before app is ready; Chromium reads it
+// at startup. Harmless on macOS/Windows/X11, where it's simply unused.
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
+  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+}
 
 // Without this lock, launching the app while it's already running (e.g. from
 // the Start Menu shortcut, or the installer's "run after finish" option)
@@ -787,7 +797,37 @@ ipcMain.handle('get-today', async () => {
   }
 });
 
-ipcMain.handle('clock-in', async () => {
+// Optional clock-in attribution pickers — member/owner/leader projects via
+// daily-planning/my-projects, and tasks for a chosen project.
+ipcMain.handle('get-my-projects', async () => {
+  if (!get_token('auth_token')) return [];
+  const axios = require('axios');
+  try {
+    const res = await authRequest((token) => axios.get(`${API_BASE}/daily-planning/my-projects`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    return Array.isArray(res.data.payload) ? res.data.payload : [];
+  } catch (err) {
+    throw toIpcSafeError(err);
+  }
+});
+
+ipcMain.handle('get-project-tasks', async (_event, projectId) => {
+  if (!get_token('auth_token') || !projectId) return [];
+  const axios = require('axios');
+  try {
+    const res = await authRequest((token) => axios.get(`${API_BASE}/project/${projectId}/tasks`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { limit: 100 },
+    }));
+    const payload = res.data.payload;
+    return Array.isArray(payload?.records) ? payload.records : (Array.isArray(payload) ? payload : []);
+  } catch (err) {
+    throw toIpcSafeError(err);
+  }
+});
+
+ipcMain.handle('clock-in', async (_event, opts = {}) => {
   // Monitoring permission gate — MUST run before any attendance API call.
   // GRANTED and NOT_APPLICABLE (this platform has no such gate) proceed;
   // DENIED and UNKNOWN both block, fail-closed, with zero calls to
@@ -860,9 +900,16 @@ ipcMain.handle('clock-in', async () => {
     });
   } catch (_) {}
 
+  // Optional Hubstaff-style attribution — omit keys entirely when unset so
+  // the body stays `{}`-compatible with older backends.
+  const clock_in_body = {};
+  if (opts?.project_id) clock_in_body.project_id = opts.project_id;
+  if (opts?.task_id) clock_in_body.task_id = opts.task_id;
+  if (opts?.note) clock_in_body.note = opts.note;
+
   let entry;
   try {
-    const res = await authRequest((token) => axios.post(`${API_BASE}/timesheet/clock-in`, {}, {
+    const res = await authRequest((token) => axios.post(`${API_BASE}/timesheet/clock-in`, clock_in_body, {
       headers: { Authorization: `Bearer ${token}` },
     }));
     entry = res.data.payload;
@@ -893,8 +940,15 @@ ipcMain.handle('clock-in', async () => {
     const todayRes = await authRequest((token) => axios.get(`${API_BASE}/timesheet/today`, {
       headers: { Authorization: `Bearer ${token}` },
     }));
-    const prior_seconds = todayRes.data.payload?.entry?.prior_seconds;
-    if (typeof prior_seconds === 'number') entry = { ...entry, prior_seconds };
+    const todayPayload = todayRes.data.payload;
+    const prior_seconds = todayPayload?.entry?.prior_seconds;
+    const server_now = todayPayload?.server_now;
+    const patch = {};
+    if (typeof prior_seconds === 'number') patch.prior_seconds = prior_seconds;
+    // Authoritative server instant so the renderer can anchor elapsed
+    // without trusting a skewed OS clock (clock-ahead +12h class of bug).
+    if (typeof server_now === 'string') patch.server_now = server_now;
+    if (Object.keys(patch).length) entry = { ...entry, ...patch };
   } catch (_) {}
 
   store.set('clocked_in', true);
@@ -1191,10 +1245,11 @@ ipcMain.handle('desktop-update:restart-and-install', () => {
 function getMonitoringPermissionStatus() {
   if (process.platform !== 'darwin') {
     // Windows: screenshot-desktop's GDI-based capture has no OS permission
-    // prompt to check. Linux: same, for the X11 case this app currently
-    // supports — screenshot-desktop does not do Wayland-portal capture, so
-    // inventing a Wayland-specific permission check here would just be
-    // fiction. Documented gap, not a fake gate.
+    // prompt to check. Linux/X11: same. Linux/Wayland's portal consent
+    // dialog isn't a queryable OS permission either — it's a one-time
+    // prompt surfaced by captureWaylandScreenshot() itself, whose result is
+    // what verifyScreenshotCaptureWorks() (called by the callers of this
+    // function) actually reports.
     return 'NOT_APPLICABLE';
   }
   try {
@@ -1222,27 +1277,56 @@ function getMonitoringPermissionStatus() {
 // Linux only. screenshot-desktop's capture is X11-only — it shells out to
 // ImageMagick's `import -window root`, which has no concept of a Wayland
 // compositor and fails there every time (Wayland deliberately has no
-// equivalent of X11's "any app can grab the whole screen" model; a
-// compositor-mediated portal, e.g. xdg-desktop-portal + PipeWire, with its
-// own one-time user consent dialog, is the only correct way to capture
-// under Wayland — a real feature this app does not implement yet, not
-// something a config flag can turn on). Reported 2026-09 on Ubuntu, whose
-// default session is Wayland since 22.04: capture ran (ImageMagick present)
-// but failed with "unable to read X window image 'root': Resource
-// temporarily unavailable" — a real X11 protocol error, correctly detected,
-// but confusing to a reader with no ImageMagick/X11 background. Detected
-// upfront via $XDG_SESSION_TYPE so the employee gets a direct explanation
-// and workaround instead of that raw error after a capture attempt.
-function isUnsupportedWaylandSession() {
+// equivalent of X11's "any app can grab the whole screen" model). Reported
+// 2026-09 on Ubuntu, whose default session is Wayland since 22.04: capture
+// ran (ImageMagick present) but failed with "unable to read X window image
+// 'root': Resource temporarily unavailable" — a real X11 protocol error,
+// correctly detected, but confusing to a reader with no ImageMagick/X11
+// background. Detected upfront via $XDG_SESSION_TYPE so the right capture
+// path (see captureWaylandScreenshot below) is used instead of the X11 one.
+function isWaylandSession() {
   return process.platform === 'linux' && process.env.XDG_SESSION_TYPE === 'wayland';
 }
 
+// Wayland screenshot capture — xdg-desktop-portal + PipeWire, via
+// Electron's own desktopCapturer (Chromium's PipeWire/portal integration,
+// enabled above with the WebRTCPipeWireCapturer feature switch). This is
+// the only correct way to capture under Wayland: unlike X11's "any app can
+// grab the whole screen" model, the compositor mediates every capture
+// through the portal, which pops a one-time OS consent dialog the employee
+// must approve (persisted by the portal after that — subsequent calls in
+// the same install don't re-prompt). No native helper binary or additional
+// dependency is needed: desktopCapturer.getSources() already returns a
+// NativeImage per screen, and requesting it at full display resolution
+// (rather than the small default thumbnail size meant for picker UIs)
+// makes that NativeImage itself the screenshot.
+async function captureWaylandScreenshot() {
+  const display = screen.getPrimaryDisplay();
+  const { width, height } = display.size;
+  const scale = display.scaleFactor || 1;
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: { width: Math.round(width * scale), height: Math.round(height * scale) },
+  });
+  const primary = sources.find((s) => s.display_id === String(display.id)) || sources[0];
+  if (!primary || primary.thumbnail.isEmpty()) {
+    throw new Error('No screen source available (portal capture returned nothing — consent may have been denied)');
+  }
+  return primary.thumbnail.toPNG();
+}
+
 async function verifyScreenshotCaptureWorks() {
-  if (isUnsupportedWaylandSession()) {
-    return {
-      ok: false,
-      error: 'Screen monitoring is not yet supported on Wayland (this device\'s current session type). Switch to an X11/Xorg session from your login screen\'s session-type picker, then try again — ask IT if you don\'t see that option.',
-    };
+  if (isWaylandSession()) {
+    try {
+      await captureWaylandScreenshot();
+      return { ok: true };
+    } catch (err) {
+      const message = err?.message || String(err);
+      return {
+        ok: false,
+        error: `Screen monitoring capture failed on Wayland: ${message}. If a screen-sharing permission prompt appeared, approve it and try again — ask IT if it doesn't appear.`,
+      };
+    }
   }
   try {
     const screenshot = require('screenshot-desktop');
@@ -1476,10 +1560,10 @@ async function takeScreenshot(token) {
           } catch (_) {}
         }
 
-        const screenshot = require('screenshot-desktop');
         const axios = require('axios');
-
-        img = await screenshot({ format: 'png' });
+        img = isWaylandSession()
+          ? await captureWaylandScreenshot()
+          : await require('screenshot-desktop')({ format: 'png' });
         const key = `screenshots/${store.get('user')?.id || 'unknown'}/${Date.now()}.png`;
 
         // Get presigned upload URL from backend
