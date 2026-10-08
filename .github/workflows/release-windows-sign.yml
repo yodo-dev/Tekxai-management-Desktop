@@ -1,0 +1,43 @@
+# Audit P2 — release gate: publisher pin + nested capture-helper signature script.
+# Full Authenticode verify runs on Windows after `npm run build:win` produces dist/.
+name: Windows sign gate
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/verify-win-signature.js'
+      - 'electron-builder.config.js'
+      - 'package.json'
+      - '.github/workflows/release-windows-sign.yml'
+  push:
+    branches: [main, master]
+    paths:
+      - 'scripts/verify-win-signature.js'
+      - 'electron-builder.config.js'
+      - 'package.json'
+      - '.github/workflows/release-windows-sign.yml'
+
+jobs:
+  assert-publisher-and-nested-helper-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert win.publisherName pinned
+        env:
+          TEKXAI_ALLOW_UNSIGNED_WIN: '1'
+        run: |
+          node -e "
+            const cfg = require('./electron-builder.config.js');
+            const p = cfg.win && cfg.win.publisherName;
+            const list = Array.isArray(p) ? p : [p];
+            if (!p || !list.some(n => /tekxai/i.test(String(n)))) {
+              console.error('FAIL: win.publisherName must include Tekxai LLC');
+              process.exit(1);
+            }
+            console.log('OK publisherName', p);
+          "
+      - name: Assert nested helper check exists in verify script
+        run: |
+          grep -q 'assertNestedCaptureHelpersSigned' scripts/verify-win-signature.js
+          grep -q 'screenCapture' scripts/verify-win-signature.js
+          echo 'OK nested capture helper gate present'

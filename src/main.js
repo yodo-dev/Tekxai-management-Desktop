@@ -57,9 +57,18 @@ function get_token(key) {
   if (!TOKEN_KEYS.has(key)) throw new Error(`get_token: not a token key: ${key}`);
   const raw = store.get(key);
   if (raw == null) return undefined;
-  // Legacy plaintext shapes — readable once; next set_token migrates to enc.
-  if (typeof raw === 'string') return raw;
-  if (raw.plain !== undefined) return raw.plain;
+  // Legacy plaintext — migrate to enc when possible, otherwise purge (audit P1).
+  if (typeof raw === 'string' || (raw && raw.plain !== undefined)) {
+    const plain = typeof raw === 'string' ? raw : raw.plain;
+    store.delete(key);
+    if (plain != null && safeStorage.isEncryptionAvailable()) {
+      try {
+        set_token(key, String(plain));
+        return String(plain);
+      } catch { /* fall through */ }
+    }
+    return undefined;
+  }
   if (raw.enc !== undefined) {
     if (!safeStorage.isEncryptionAvailable()) return undefined;
     try { return safeStorage.decryptString(Buffer.from(raw.enc, 'base64')); }
