@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('agent', {
   getStore:      (key)            => ipcRenderer.invoke('get-store', key),
   setStore:      (key, val)       => ipcRenderer.invoke('set-store', key, val),
   delStore:      (key)            => ipcRenderer.invoke('del-store', key),
+  hasAuthSession: ()              => ipcRenderer.invoke('has-auth-session'),
   login:         (creds)          => ipcRenderer.invoke('login', creds),
   logout:        ()               => ipcRenderer.invoke('logout'),
   getAppVersion: ()               => ipcRenderer.invoke('get-app-version'),
@@ -57,6 +58,8 @@ contextBridge.exposeInMainWorld('agent', {
   onShiftEndReminderShow:       (cb) => ipcRenderer.on('shift-end-reminder:show', cb),
   onShiftEndReminderHide:       (cb) => ipcRenderer.on('shift-end-reminder:hide', cb),
   onShiftEndReminderCheckedOut: (cb) => ipcRenderer.on('shift-end-reminder:checked-out', (_e, entry) => cb(entry)),
+  onShiftEndReminderCheckoutFailed: (cb) => ipcRenderer.on('shift-end-reminder:checkout-failed', (_e, data) => cb(data)),
+  onShiftEndReminderReportRequired: (cb) => ipcRenderer.on('shift-end-reminder:report-required', () => cb()),
   shiftEndReminderContinue:     ()   => ipcRenderer.invoke('shift-end-reminder:continue'),
   shiftEndReminderCheckout:     ()   => ipcRenderer.invoke('shift-end-reminder:checkout'),
 });

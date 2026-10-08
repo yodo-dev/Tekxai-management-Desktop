@@ -41,35 +41,29 @@ const store = new Store();
 // non-secret profile display data (no password, ever), and everything else
 // (clocked_in, pending_update_version, etc.) was never sensitive.
 //
-// Falls back to storing the raw value if safeStorage isn't available on
-// this OS/session (e.g. some headless Linux without a keyring) — a session
-// that still works without hardened-at-rest storage beats one that can't
-// log in at all. get_token() transparently reads either shape so upgrading
-// from the previous plaintext electron-store format doesn't log anyone out.
+// Fail-closed (audit P0/P1): never write plaintext tokens when safeStorage
+// is unavailable. get_token() still reads legacy {plain}/string shapes once
+// so upgrades do not force-logout, but new writes require encryption.
 const TOKEN_KEYS = new Set(['auth_token', 'refresh_token']);
 function set_token(key, value) {
   if (!TOKEN_KEYS.has(key)) throw new Error(`set_token: not a token key: ${key}`);
   if (value == null) { store.delete(key); return; }
-  if (safeStorage.isEncryptionAvailable()) {
-    store.set(key, { enc: safeStorage.encryptString(String(value)).toString('base64') });
-  } else {
-    store.set(key, { plain: String(value) });
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Secure token storage is unavailable on this device. Sign in from the web dashboard or enable the OS keyring.');
   }
+  store.set(key, { enc: safeStorage.encryptString(String(value)).toString('base64') });
 }
 function get_token(key) {
   if (!TOKEN_KEYS.has(key)) throw new Error(`get_token: not a token key: ${key}`);
   const raw = store.get(key);
   if (raw == null) return undefined;
-  // Pre-hardening installs may still have the bare string from before this
-  // change shipped — read it once, then it gets re-saved in the new
-  // encrypted shape the next time set_token() runs for that key (login or
-  // refresh), so it self-migrates rather than needing a one-off migration.
+  // Legacy plaintext shapes — readable once; next set_token migrates to enc.
   if (typeof raw === 'string') return raw;
   if (raw.plain !== undefined) return raw.plain;
   if (raw.enc !== undefined) {
-    if (!safeStorage.isEncryptionAvailable()) return undefined; // can't decrypt — treat as logged out, never as a plaintext fallback
+    if (!safeStorage.isEncryptionAvailable()) return undefined;
     try { return safeStorage.decryptString(Buffer.from(raw.enc, 'base64')); }
-    catch { return undefined; } // e.g. decrypted on a different OS user/machine — never trust it
+    catch { return undefined; }
   }
   return undefined;
 }
@@ -98,6 +92,9 @@ let screenshotTimer = null;
 let appUsageTimer = null;
 let heartbeatTimer = null;
 let sessionId = null;
+let sessionUploadToken = null;
+let consecutiveScreenshotFailures = 0;
+const MAX_SCREENSHOT_FAILURES_BEFORE_FORCE_OUT = 3;
 
 // At most one screenshot / app-usage cycle at a time (no queue). Prevents
 // hung network/native work from stacking PNG Buffers or helper processes.
@@ -663,11 +660,27 @@ function showMainWindow() {
 
 // ── IPC handlers ──────────────────────────────────────────────────────────────
 
-ipcMain.handle('get-store', (_, key) => store.get(key));
-ipcMain.handle('set-store', (_, key, value) => store.set(key, value));
+// Deny raw token key access via generic store IPC (audit P0) — renderer must
+// never read {enc}/{plain} blobs or plant plaintext auth_token values.
+ipcMain.handle('get-store', (_, key) => {
+  if (TOKEN_KEYS.has(key)) return undefined;
+  return store.get(key);
+});
+ipcMain.handle('set-store', (_, key, value) => {
+  if (TOKEN_KEYS.has(key)) throw new Error('Cannot set auth tokens via set-store');
+  return store.set(key, value);
+});
 ipcMain.handle('minimize-window', () => mainWindow?.minimize());
 ipcMain.handle('close-window', () => app.quit());
-ipcMain.handle('del-store', (_, key) => store.delete(key));
+ipcMain.handle('del-store', (_, key) => {
+  if (TOKEN_KEYS.has(key)) {
+    delete_token(key);
+    return;
+  }
+  return store.delete(key);
+});
+// Renderer must not read token blobs — only a boolean session check.
+ipcMain.handle('has-auth-session', () => Boolean(get_token('auth_token')));
 
 ipcMain.handle('login', async (_, { email, password }) => {
   const axios = require('axios');
@@ -724,6 +737,8 @@ ipcMain.handle('logout', async () => {
   store.delete('user');
   store.set('clocked_in', false);
   sessionId = null;
+  sessionUploadToken = null;
+  consecutiveScreenshotFailures = 0;
 });
 
 ipcMain.handle('get-today', async () => {
@@ -889,16 +904,29 @@ ipcMain.handle('clock-in', async (_event, opts = {}) => {
 
   const axios = require('axios');
 
-  // Start monitoring session
+  // Start monitoring session — fail-closed (audit P0): no attendance without
+  // an ACTIVE screenshot session + server-issued upload_token.
   try {
     await authRequest(async (token) => {
       const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
         agent_version: app.getVersion(),
         os_platform: process.platform,
       }, { headers: { Authorization: `Bearer ${token}` } });
-      sessionId = sessRes.data.payload.id;
+      const payload = sessRes.data.payload;
+      sessionId = payload.id;
+      sessionUploadToken = payload.upload_token || null;
+      if (!sessionId || !sessionUploadToken) {
+        throw new Error('Monitoring session response missing id or upload_token');
+      }
     });
-  } catch (_) {}
+  } catch (err) {
+    sessionId = null;
+    sessionUploadToken = null;
+    const e = new Error('Could not start screen monitoring session. Clock-in is blocked until monitoring is available.');
+    e.code = 'MONITORING_SESSION_FAILED';
+    throw e;
+  }
+  consecutiveScreenshotFailures = 0;
 
   // Optional Hubstaff-style attribution — omit keys entirely when unset so
   // the body stays `{}`-compatible with older backends.
@@ -1018,6 +1046,7 @@ ipcMain.handle('clock-out', async () => {
           }));
         } catch (_) {}
         sessionId = null;
+        sessionUploadToken = null;
       }
     }
     throw toIpcSafeError(err);
@@ -1031,6 +1060,7 @@ ipcMain.handle('clock-out', async () => {
       }));
     } catch (_) {}
     sessionId = null;
+    sessionUploadToken = null;
   }
 
   store.set('clocked_in', false);
@@ -1128,10 +1158,50 @@ async function fireShiftEndReminder() {
   // Guard against a race with clock-out that landed between the timer
   // firing and this callback running.
   if (!get_token('auth_token')) return;
+
+  // Re-verify against the backend before showing. Otherwise a stale timer
+  // (e.g. app opened the next morning after a successful yesterday checkout,
+  // or a web checkout that raced the delayed fire) pops "Are you still
+  // working?" against a session that is already closed — and the stuck
+  // "Checking out…" UI follows when clock-out 404s are swallowed.
+  try {
+    const axios = require('axios');
+    const todayRes = await authRequest((token) => axios.get(`${API_BASE}/timesheet/today`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    const payload = todayRes.data?.payload;
+    if (!payload?.clocked_in || payload?.clocked_out) {
+      store.set('clocked_in', false);
+      stopScreenshots();
+      clearShiftEndReminder();
+      return;
+    }
+  } catch (err) {
+    // Can't confirm an open session — do not force the modal or auto-checkout.
+    console.error('[shift-end-reminder] pre-show today check failed:', err.message);
+    return;
+  }
+
   shiftEndReminderActive = true;
   mainWindow?.webContents.send('shift-end-reminder:show');
   if (autoCheckoutTimer) clearTimeout(autoCheckoutTimer);
-  autoCheckoutTimer = setTimeout(() => performAutoCheckout(), 30 * 1000);
+  autoCheckoutTimer = setTimeout(() => {
+    performAutoCheckout().catch(() => {});
+  }, 30 * 1000);
+}
+
+async function endMonitoringSessionBestEffort() {
+  if (!sessionId) return;
+  try {
+    await authRequest((token) => {
+      const axios = require('axios');
+      return axios.post(`${API_BASE}/monitoring/session/${sessionId}/end`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    });
+  } catch (_) {}
+  sessionId = null;
+  sessionUploadToken = null;
 }
 
 // Shared by the 30s no-response timeout and the popup's own "NO, CHECK OUT"
@@ -1146,23 +1216,47 @@ async function performAutoCheckout() {
       headers: { Authorization: `Bearer ${token}` },
     }));
     stopScreenshots();
-    if (sessionId) {
-      try {
-        await authRequest((token) => axios.post(`${API_BASE}/monitoring/session/${sessionId}/end`, {}, {
-          headers: { Authorization: `Bearer ${token}` },
-        }));
-      } catch (_) {}
-      sessionId = null;
-    }
+    await endMonitoringSessionBestEffort();
     store.set('clocked_in', false);
     clearShiftEndReminder();
     mainWindow?.webContents.send('shift-end-reminder:checked-out', res.data.payload);
   } catch (err) {
-    // REPORT_REQUIRED or a transient failure — either way this can't
-    // silently invent a checked-out state. Leave the popup up; the
-    // employee (or the next reconciliation, if the backend actually did
-    // close it) resolves it from here.
-    console.error('[shift-end-reminder] auto-checkout failed:', err.message);
+    const status = err.response?.status;
+    const msg = err.response?.data?.message || err.message || '';
+    const code = err.response?.data?.code || err.code;
+
+    // Already closed (yesterday checkout, server auto-checkout, web checkout).
+    // Treat as success so the modal cannot stick on "Checking out…".
+    if (status === 404) {
+      stopScreenshots();
+      await endMonitoringSessionBestEffort();
+      store.set('clocked_in', false);
+      clearShiftEndReminder();
+      mainWindow?.webContents.send('shift-end-reminder:checked-out', { already_closed: true });
+      return;
+    }
+
+    // Daily Report gate — hide this modal and let the report flow take over.
+    if (status === 422 || code === 'REPORT_REQUIRED' || /Daily Report required/i.test(String(msg))) {
+      if (autoCheckoutTimer) { clearTimeout(autoCheckoutTimer); autoCheckoutTimer = null; }
+      mainWindow?.webContents.send('shift-end-reminder:hide');
+      mainWindow?.webContents.send('shift-end-reminder:report-required');
+      throw toIpcSafeError(err);
+    }
+
+    // Transient / other failure — tell the renderer to reset the button and
+    // re-arm a 30s auto-retry so we never leave the employee stuck >10 min
+    // on "Checking out…" with no further attempts.
+    console.error('[shift-end-reminder] auto-checkout failed:', msg);
+    mainWindow?.webContents.send('shift-end-reminder:checkout-failed', {
+      message: msg || 'Checkout failed. Please try again.',
+    });
+    if (shiftEndReminderActive) {
+      autoCheckoutTimer = setTimeout(() => {
+        performAutoCheckout().catch(() => {});
+      }, 30 * 1000);
+    }
+    throw toIpcSafeError(err);
   }
 }
 
@@ -1288,19 +1382,12 @@ function isWaylandSession() {
   return process.platform === 'linux' && process.env.XDG_SESSION_TYPE === 'wayland';
 }
 
-// Wayland screenshot capture — xdg-desktop-portal + PipeWire, via
-// Electron's own desktopCapturer (Chromium's PipeWire/portal integration,
-// enabled above with the WebRTCPipeWireCapturer feature switch). This is
-// the only correct way to capture under Wayland: unlike X11's "any app can
-// grab the whole screen" model, the compositor mediates every capture
-// through the portal, which pops a one-time OS consent dialog the employee
-// must approve (persisted by the portal after that — subsequent calls in
-// the same install don't re-prompt). No native helper binary or additional
-// dependency is needed: desktopCapturer.getSources() already returns a
-// NativeImage per screen, and requesting it at full display resolution
-// (rather than the small default thumbnail size meant for picker UIs)
-// makes that NativeImage itself the screenshot.
-async function captureWaylandScreenshot() {
+// Prefer Electron desktopCapturer on every platform (audit P0 Device Guard):
+// screenshot-desktop's Windows JIT helper (screenCapture_*.exe in %TEMP%) is
+// unsigned and blocked by WDAC — that caused Sibghat-class CAPTURE_FAILED
+// outages. desktopCapturer uses Chromium's built-in path (PipeWire/portal on
+// Wayland; OS capture APIs elsewhere) and needs no nested unsigned binary.
+async function captureViaDesktopCapturer() {
   const display = screen.getPrimaryDisplay();
   const { width, height } = display.size;
   const scale = display.scaleFactor || 1;
@@ -1310,50 +1397,52 @@ async function captureWaylandScreenshot() {
   });
   const primary = sources.find((s) => s.display_id === String(display.id)) || sources[0];
   if (!primary || primary.thumbnail.isEmpty()) {
-    throw new Error('No screen source available (portal capture returned nothing — consent may have been denied)');
+    throw new Error('No screen source available (capture returned nothing — consent may have been denied)');
   }
   return primary.thumbnail.toPNG();
 }
 
+async function captureScreenPng() {
+  try {
+    return await captureViaDesktopCapturer();
+  } catch (primaryErr) {
+    // Linux X11 only: optional ImageMagick fallback if desktopCapturer fails.
+    // Never fall back on win32 — that path is the unsigned JIT helper.
+    if (process.platform === 'linux' && !isWaylandSession()) {
+      return await require('screenshot-desktop')({ format: 'png' });
+    }
+    throw primaryErr;
+  }
+}
+
 async function verifyScreenshotCaptureWorks() {
-  if (isWaylandSession()) {
-    try {
-      await captureWaylandScreenshot();
-      return { ok: true };
-    } catch (err) {
-      const message = err?.message || String(err);
+  try {
+    await captureScreenPng();
+    return { ok: true };
+  } catch (err) {
+    const message = err?.message || String(err);
+    if (isWaylandSession()) {
       return {
         ok: false,
         error: `Screen monitoring capture failed on Wayland: ${message}. If a screen-sharing permission prompt appeared, approve it and try again — ask IT if it doesn't appear.`,
       };
     }
-  }
-  try {
-    const screenshot = require('screenshot-desktop');
-    await screenshot({ format: 'png' });
-    return { ok: true };
-  } catch (err) {
-    // screenshot-desktop shells out to ImageMagick's `import` binary on
-    // Linux (see node_modules/screenshot-desktop/lib/linux/index.js) —
-    // when it's missing, Node's own execFile/spawn error is a bare
-    // "spawn import ENOENT", meaningless to an employee reading it in the
-    // clock-in modal. Translate that one specific, well-understood case
-    // into an actionable message instead of passing the raw error through.
-    const message = err?.message || String(err);
     if (process.platform === 'linux' && /spawn import ENOENT/i.test(message)) {
       return {
         ok: false,
         error: 'ImageMagick is not installed on this device (required for screen capture on Linux). Ask IT to run: sudo apt install imagemagick (or the equivalent for your distro), then try again.',
       };
     }
-    // A second, narrower Wayland signal — some Wayland sessions still
-    // report $XDG_SESSION_TYPE unreliably (a stale/wrapped launcher
-    // environment), so isUnsupportedWaylandSession() above can miss it;
-    // ImageMagick's own X11 failure text is the fallback tell.
     if (process.platform === 'linux' && /unable to read X window image/i.test(message)) {
       return {
         ok: false,
         error: 'Screen monitoring failed because this session has no X11 display to capture (likely Wayland). Switch to an X11/Xorg session from your login screen, then try again — ask IT if you don\'t see that option.',
+      };
+    }
+    if (process.platform === 'win32' && /WDAC|Code Integrity|blocked by policy|0x80070005/i.test(message)) {
+      return {
+        ok: false,
+        error: 'Screen capture was blocked by Windows Device Guard / WDAC. Ask IT to allowlist Tekxai Agent (see docs/WDAC_ALLOWLIST.md) or wait for the signed capture path in this build.',
       };
     }
     return { ok: false, error: message };
@@ -1540,6 +1629,32 @@ async function pollAppUsage(token) {
   );
 }
 
+async function forceClockOutForMonitoringFailure(reason) {
+  console.error('[screenshot] fail-closed force clock-out:', reason);
+  stopScreenshots();
+  const axios = require('axios');
+  try {
+    await authRequest((token) => axios.post(`${API_BASE}/timesheet/clock-out`, {}, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+  } catch (err) {
+    console.error('[screenshot] force clock-out failed:', err.message);
+  }
+  if (sessionId) {
+    try {
+      await authRequest((token) => axios.post(`${API_BASE}/monitoring/session/${sessionId}/end`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+      }));
+    } catch (_) {}
+  }
+  sessionId = null;
+  sessionUploadToken = null;
+  consecutiveScreenshotFailures = 0;
+  store.set('clocked_in', false);
+  clearShiftEndReminder();
+  mainWindow?.webContents.send('session-expired');
+}
+
 async function takeScreenshot(token) {
   await runExclusive(
     screenshotInFlight,
@@ -1548,25 +1663,23 @@ async function takeScreenshot(token) {
       // hung request path cannot leave it reachable on this closure.
       let img = null;
       try {
-        // Try to recover sessionId if missing
-        if (!sessionId) {
+        if (!sessionId || !sessionUploadToken) {
           const axios = require('axios');
-          try {
-            const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
-              agent_version: app.getVersion(),
-              os_platform: process.platform,
-            }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
-            sessionId = sessRes.data?.payload?.id;
-          } catch (_) {}
+          const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
+            agent_version: app.getVersion(),
+            os_platform: process.platform,
+          }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
+          sessionId = sessRes.data?.payload?.id;
+          sessionUploadToken = sessRes.data?.payload?.upload_token || null;
+          if (!sessionId || !sessionUploadToken) {
+            throw new Error('Monitoring session recovery missing id or upload_token');
+          }
         }
 
         const axios = require('axios');
-        img = isWaylandSession()
-          ? await captureWaylandScreenshot()
-          : await require('screenshot-desktop')({ format: 'png' });
+        img = await captureScreenPng();
         const key = `screenshots/${store.get('user')?.id || 'unknown'}/${Date.now()}.png`;
 
-        // Get presigned upload URL from backend
         const fileName = `${Date.now()}.png`;
         let fileKey = key;
         let fileUrl = null;
@@ -1592,18 +1705,21 @@ async function takeScreenshot(token) {
           }
         } catch (_) {}
 
-        // Record in backend (with or without S3 URL). Do NOT base64-encode the
-        // full PNG for a fallback stub — that briefly doubles memory on Retina.
         await axios.post(`${API_BASE}/monitoring/screenshot`, {
           session_id: sessionId,
           file_key: fileKey,
           file_url: fileUrl || 'data:image/png;base64,',
-          captured_at: new Date().toISOString(),
+          upload_token: sessionUploadToken,
         }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
 
+        consecutiveScreenshotFailures = 0;
         mainWindow?.webContents.send('screenshot-taken');
       } catch (err) {
         console.error('[screenshot]', err.message);
+        consecutiveScreenshotFailures += 1;
+        if (consecutiveScreenshotFailures >= MAX_SCREENSHOT_FAILURES_BEFORE_FORCE_OUT) {
+          await forceClockOutForMonitoringFailure(err.message);
+        }
       } finally {
         img = null;
       }

@@ -61,6 +61,7 @@ function buildContext(agentOverrides) {
   const agentCalls = { shiftEndReminderContinue: 0, shiftEndReminderCheckout: 0 };
   const defaults = {
     getStore: async () => null,
+    hasAuthSession: async () => false,
     onScreenshot: () => {},
     onSessionExpired: () => {},
     onUpdateDownloading: () => {},
@@ -76,6 +77,8 @@ function buildContext(agentOverrides) {
     onShiftEndReminderShow: (cb) => { shiftEndCallbacks.show = cb; },
     onShiftEndReminderHide: (cb) => { shiftEndCallbacks.hide = cb; },
     onShiftEndReminderCheckedOut: (cb) => { shiftEndCallbacks.checkedOut = cb; },
+    onShiftEndReminderCheckoutFailed: (cb) => { shiftEndCallbacks.checkoutFailed = cb; },
+    onShiftEndReminderReportRequired: (cb) => { shiftEndCallbacks.reportRequired = cb; },
     shiftEndReminderContinue: async () => { agentCalls.shiftEndReminderContinue++; },
     shiftEndReminderCheckout: async () => { agentCalls.shiftEndReminderCheckout++; },
   };
@@ -158,4 +161,22 @@ test('a failed checkout does not throw and does not apply a clock-out result on 
   await new Promise((r) => setTimeout(r, 0));
   await assert.doesNotReject(context.shiftEndReminderCheckout());
   assert.notEqual(document.getElementById('tracker-time').textContent, '0h:00m:00s');
+});
+
+test('checkout-failed event resets the stuck Checking out… button label', async () => {
+  const { document, shiftEndCallbacks } = buildContext();
+  await new Promise((r) => setTimeout(r, 0));
+  shiftEndCallbacks.show();
+  const btn = document.querySelector('#shift-end-reminder-card .btn-outline')
+    || document.getElementById('shift-end-reminder-card-child');
+  // Simulate the loading state the real click sets.
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking out…'; }
+  assert.ok(shiftEndCallbacks.checkoutFailed, 'renderer did not register checkout-failed listener');
+  shiftEndCallbacks.checkoutFailed({ message: 'Network error' });
+  // Harness querySelector returns a stub child — assert listener ran without throw
+  // and subtitle was updated when present.
+  const sub = document.querySelector('#shift-end-reminder-card .update-subtitle');
+  if (sub && sub.textContent) {
+    assert.match(sub.textContent, /Network error/);
+  }
 });

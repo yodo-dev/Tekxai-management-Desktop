@@ -198,7 +198,51 @@ function main() {
     console.warn('[verify-win-sign] WARN: osslsigncode not on PATH — skipped digest/timestamp check');
   }
 
+  // Nested helpers (audit P2): if win-unpacked / asar.unpacked still ships
+  // screenshot-desktop's screenCapture_*.exe, those PE files must also carry
+  // Authenticode — unsigned TEMP/JIT helpers fail Device Guard. Prefer builds
+  // that use Electron desktopCapturer and omit these binaries entirely.
+  assertNestedCaptureHelpersSigned();
+
   ok('PASS — Windows installer signature verified');
+}
+
+function walkFiles(dir, acc = []) {
+  if (!fs.existsSync(dir)) return acc;
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name);
+    let st;
+    try { st = fs.statSync(p); } catch { continue; }
+    if (st.isDirectory()) walkFiles(p, acc);
+    else acc.push(p);
+  }
+  return acc;
+}
+
+function assertNestedCaptureHelpersSigned() {
+  // Only packaged output — never scan node_modules (dev trees ship unsigned
+  // vendor helpers that must not block a Setup.exe-only verify).
+  const candidates = [
+    path.join(distDir, 'win-unpacked'),
+    path.join(distDir, 'win-ia32-unpacked'),
+  ];
+  const helpers = [];
+  for (const root of candidates) {
+    for (const f of walkFiles(root)) {
+      if (/screenCapture.*\.(exe|dll)$/i.test(path.basename(f))) helpers.push(f);
+    }
+  }
+  if (!helpers.length) {
+    ok('No nested screenCapture_*.exe in dist unpack (desktopCapturer-first — preferred)');
+    return;
+  }
+  for (const helper of helpers) {
+    const auth = readAuthenticodeTable(helper);
+    if (!auth) {
+      fail(`Nested capture helper is UNSIGNED: ${path.relative(rootDir, helper)} — sign it or remove screenshot-desktop Windows JIT from the package`);
+    }
+    ok(`Nested helper has Authenticode: ${path.relative(rootDir, helper)}`);
+  }
 }
 
 main();

@@ -224,10 +224,12 @@ function wireAttributionPickers() {
     if (dashEl) dashEl.textContent = text;
   }).catch(() => {});
 
-  const token = await window.agent.getStore('auth_token');
+  const hasSession = typeof window.agent.hasAuthSession === 'function'
+    ? await window.agent.hasAuthSession()
+    : Boolean(await window.agent.getStore('auth_token'));
   const user  = await window.agent.getStore('user');
 
-  if (token && user) {
+  if (hasSession && user) {
     showDashboard(user);
     await refreshToday();
   }
@@ -273,6 +275,20 @@ function wireAttributionPickers() {
   window.agent.onShiftEndReminderCheckedOut?.((entry) => {
     hideShiftEndReminderModal();
     applyClockOutResult(entry || {});
+  });
+  // Auto-checkout / "No, Check Out" failed without closing the session —
+  // reset the stuck "Checking out…" label so the employee can retry.
+  window.agent.onShiftEndReminderCheckoutFailed?.((data) => {
+    const btn = document.querySelector('#shift-end-reminder-card .btn-outline');
+    if (btn) { btn.disabled = false; btn.textContent = 'No, Check Out'; }
+    const sub = document.querySelector('#shift-end-reminder-card .update-subtitle');
+    if (sub && data?.message) {
+      sub.textContent = `${data.message} — you can try Check Out again, or Continue Working.`;
+    }
+  });
+  window.agent.onShiftEndReminderReportRequired?.(() => {
+    hideShiftEndReminderModal();
+    showReportRequiredModal();
   });
 })();
 
@@ -1152,11 +1168,23 @@ async function shiftEndReminderCheckout() {
   if (btn) { btn.disabled = true; btn.textContent = 'Checking out…'; }
   try {
     await window.agent.shiftEndReminderCheckout();
-    // The 'shift-end-reminder:checked-out' listener (registered in the boot
-    // IIFE) applies the result and hides this modal — no need to duplicate
-    // that here.
+    // Success path: 'shift-end-reminder:checked-out' hides the modal.
+    // Failure path: main throws (or emits checkout-failed) — reset below.
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = 'No, Check Out'; }
+    if (e?.code === 'REPORT_REQUIRED' || /Daily Report required/i.test(e?.message || '')) {
+      hideShiftEndReminderModal();
+      showReportRequiredModal();
+      return;
+    }
+    // Already closed on the server — treat as checked out (main also emits
+    // checked-out on 404; this is a belt-and-suspenders for older mains).
+    if (/not found|no open|already/i.test(e?.message || '')) {
+      hideShiftEndReminderModal();
+      applyClockOutResult({});
+      await refreshToday();
+      return;
+    }
     alert(e?.message || 'Checkout failed. Please try again.');
   }
 }

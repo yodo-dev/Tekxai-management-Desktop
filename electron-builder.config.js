@@ -105,6 +105,10 @@ module.exports = {
     url: 'https://releases.tekxai.services/desktop-app',
   },
   win: {
+    // Pin publisher for electron-updater / SmartScreen identity checks (audit
+    // P1). Cert CN may be "TekXAI LLC" or "Tekxai LLC" depending on the
+    // signing profile — list both so publisher verification does not fail open.
+    publisherName: ['Tekxai LLC', 'TekXAI LLC'],
     target: [{ target: 'nsis', arch: ['x64'] }],
     icon: 'assets/icon.ico',
     ...resolveWinSigning(),
