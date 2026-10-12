@@ -91,6 +91,7 @@ const {
   runExclusive,
   withTimeout,
   SCREENSHOT_API_TIMEOUT_MS,
+  SCREENSHOT_CAPTURE_TIMEOUT_MS,
   SCREENSHOT_UPLOAD_TIMEOUT_MS,
   APP_USAGE_ACTIVE_WIN_TIMEOUT_MS,
   APP_USAGE_API_TIMEOUT_MS,
@@ -1412,16 +1413,25 @@ async function captureViaDesktopCapturer() {
 }
 
 async function captureScreenPng() {
-  try {
-    return await captureViaDesktopCapturer();
-  } catch (primaryErr) {
-    // Linux X11 only: optional ImageMagick fallback if desktopCapturer fails.
-    // Never fall back on win32 — that path is the unsigned JIT helper.
-    if (process.platform === 'linux' && !isWaylandSession()) {
-      return await require('screenshot-desktop')({ format: 'png' });
+  const capture = async () => {
+    try {
+      return await captureViaDesktopCapturer();
+    } catch (primaryErr) {
+      // Linux X11 only: optional ImageMagick fallback if desktopCapturer fails.
+      // Never fall back on win32 — that path is the unsigned JIT helper.
+      if (process.platform === 'linux' && !isWaylandSession()) {
+        return await require('screenshot-desktop')({ format: 'png' });
+      }
+      throw primaryErr;
     }
-    throw primaryErr;
-  }
+  };
+  // Bound capture so a hung desktopCapturer cannot hold runExclusive forever
+  // (every later interval then skips → "clocked in, zero screenshots").
+  return withTimeout(
+    capture(),
+    SCREENSHOT_CAPTURE_TIMEOUT_MS,
+    `Screen capture timed out after ${SCREENSHOT_CAPTURE_TIMEOUT_MS}ms`,
+  );
 }
 
 async function verifyScreenshotCaptureWorks() {

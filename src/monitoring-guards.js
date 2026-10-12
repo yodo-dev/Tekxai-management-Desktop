@@ -8,6 +8,9 @@
 
 /** Small JSON API calls (presign, record, session recover). */
 const SCREENSHOT_API_TIMEOUT_MS = 15_000;
+/** OS screen capture (desktopCapturer / ImageMagick) — must not hang forever
+ *  or runExclusive holds the lock and every later interval is skipped. */
+const SCREENSHOT_CAPTURE_TIMEOUT_MS = 30_000;
 /** S3 PUT of a full-resolution PNG (can be multi-MB on Retina). */
 const SCREENSHOT_UPLOAD_TIMEOUT_MS = 60_000;
 /** Native active-window helper should return almost immediately. */
@@ -67,6 +70,7 @@ function withTimeout(promise, ms, message) {
 
 module.exports = {
   SCREENSHOT_API_TIMEOUT_MS,
+  SCREENSHOT_CAPTURE_TIMEOUT_MS,
   SCREENSHOT_UPLOAD_TIMEOUT_MS,
   APP_USAGE_ACTIVE_WIN_TIMEOUT_MS,
   APP_USAGE_API_TIMEOUT_MS,
