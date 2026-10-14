@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, systemPreferences, safeStorage, powerMonitor, desktopCapturer, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, systemPreferences, safeStorage, powerMonitor, desktopCapturer, screen, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const os = require('os');
 const Store = require('electron-store');
@@ -594,18 +594,63 @@ app.on('render-process-gone', (_event, _webContents, details) => {
 
 // ── App ready ─────────────────────────────────────────────────────────────────
 
+let tray = null;
+
+function createTray() {
+  try {
+    const iconPath = path.join(__dirname, '../assets/tray-icon.png');
+    const img = nativeImage.createFromPath(iconPath);
+    tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
+    tray.setToolTip('TEKxAI Agent');
+    updateTrayMenu();
+    tray.on('double-click', () => showMainWindow());
+    tray.on('click', () => {
+      if (process.platform === 'darwin') return;
+      showMainWindow();
+    });
+  } catch (e) {
+    console.warn('[tray] failed to create', e);
+  }
+}
+
+function updateTrayMenu() {
+  if (!tray) return;
+  const user = store.get('user');
+  const clocked = store.get('clocked_in', false);
+  const token = (() => { try { return get_token('auth_token'); } catch (_) { return null; } })();
+  const menu = Menu.buildFromTemplate([
+    { label: user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'TEKxAI Agent' : 'Not signed in', enabled: false },
+    { label: clocked ? 'Clocked in' : 'Not clocked in', enabled: false },
+    { type: 'separator' },
+    { label: 'Open Agent', click: () => showMainWindow() },
+    { label: 'Open Dashboard', click: () => shell.openExternal(DASHBOARD_URL) },
+    { type: 'separator' },
+    ...(token ? [{
+      label: clocked ? 'Clock Out' : 'Clock In',
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('tray-toggle-clock');
+        } else {
+          showMainWindow();
+        }
+      },
+    }, { type: 'separator' }] : []),
+    { label: 'Quit', click: () => app.quit() },
+  ]);
+  tray.setContextMenu(menu);
+  tray.setToolTip(clocked ? 'TEKxAI Agent — Clocked in' : 'TEKxAI Agent');
+}
+
 app.whenReady().then(() => {
   createWindow();
+  createTray();
   initAutoUpdater();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showMainWindow(); });
 });
 
-// No more tray icon to keep the process alive invisibly — closing the
-// window now means what it means in any normal desktop app: quit. macOS is
-// the one platform-standard exception (apps conventionally stay in the dock
-// with no open windows; `activate` above reopens one on a dock-icon click).
+// Keep running in the tray/menu bar when the window closes so clock status stays visible.
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // Intentionally do not quit — tray owns the process lifetime.
 });
 
 app.on('before-quit', async () => {
@@ -746,6 +791,7 @@ ipcMain.handle('logout', async () => {
   delete_token('refresh_token');
   store.delete('user');
   store.set('clocked_in', false);
+      try { updateTrayMenu(); } catch (_) {}
   sessionId = null;
   sessionUploadToken = null;
   consecutiveScreenshotFailures = 0;
@@ -990,6 +1036,7 @@ ipcMain.handle('clock-in', async (_event, opts = {}) => {
   } catch (_) {}
 
   store.set('clocked_in', true);
+      try { updateTrayMenu(); } catch (_) {}
   // Re-read from store rather than reusing a captured variable — authRequest()
   // above may have refreshed the access token mid-call, and the timers below
   // need the current one, not whatever was valid when clock-in started.
@@ -1048,6 +1095,7 @@ ipcMain.handle('clock-out', async () => {
     // that's still open locally.
     if (err.response?.status === 404) {
       store.set('clocked_in', false);
+      try { updateTrayMenu(); } catch (_) {}
       clearShiftEndReminder();
       if (sessionId) {
         try {
@@ -1074,6 +1122,7 @@ ipcMain.handle('clock-out', async () => {
   }
 
   store.set('clocked_in', false);
+      try { updateTrayMenu(); } catch (_) {}
   clearShiftEndReminder();
   return res.data.payload;
 });
@@ -1182,6 +1231,7 @@ async function fireShiftEndReminder() {
     const payload = todayRes.data?.payload;
     if (!payload?.clocked_in || payload?.clocked_out) {
       store.set('clocked_in', false);
+      try { updateTrayMenu(); } catch (_) {}
       stopScreenshots();
       clearShiftEndReminder();
       return;
@@ -1228,6 +1278,7 @@ async function performAutoCheckout() {
     stopScreenshots();
     await endMonitoringSessionBestEffort();
     store.set('clocked_in', false);
+      try { updateTrayMenu(); } catch (_) {}
     clearShiftEndReminder();
     mainWindow?.webContents.send('shift-end-reminder:checked-out', res.data.payload);
   } catch (err) {
@@ -1241,6 +1292,7 @@ async function performAutoCheckout() {
       stopScreenshots();
       await endMonitoringSessionBestEffort();
       store.set('clocked_in', false);
+      try { updateTrayMenu(); } catch (_) {}
       clearShiftEndReminder();
       mainWindow?.webContents.send('shift-end-reminder:checked-out', { already_closed: true });
       return;
@@ -1670,6 +1722,7 @@ async function forceClockOutForMonitoringFailure(reason) {
   sessionUploadToken = null;
   consecutiveScreenshotFailures = 0;
   store.set('clocked_in', false);
+      try { updateTrayMenu(); } catch (_) {}
   clearShiftEndReminder();
   mainWindow?.webContents.send('session-expired');
 }
@@ -1700,34 +1753,39 @@ async function takeScreenshot(token) {
         const key = `screenshots/${store.get('user')?.id || 'unknown'}/${Date.now()}.png`;
 
         const fileName = `${Date.now()}.png`;
-        let fileKey = key;
-        let fileUrl = null;
 
-        try {
-          const presignRes = await axios.post(`${API_BASE}/storage/presign`, {
-            file_name: fileName,
-            mime_type: 'image/png',
-            entity_type: 'screenshot',
-          }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
+        const presignRes = await axios.post(`${API_BASE}/storage/presign`, {
+          file_name: fileName,
+          mime_type: 'image/png',
+          entity_type: 'screenshot',
+        }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
 
-          const uploadUrl = presignRes.data?.payload?.upload_url;
-          fileKey = presignRes.data?.payload?.file_key || key;
+        const uploadUrl = presignRes.data?.payload?.upload_url;
+        const fileKey = presignRes.data?.payload?.file_key || key;
+        if (!uploadUrl) {
+          throw new Error('Screenshot presign returned no upload_url');
+        }
+        if (/localhost|127\.0\.0\.1|dev-upload/i.test(uploadUrl)) {
+          throw new Error('Screenshot storage is not configured (dev/local upload URL)');
+        }
 
-          if (uploadUrl && !uploadUrl.includes('localhost')) {
-            await axios.put(uploadUrl, img, {
-              headers: { 'Content-Type': 'image/png' },
-              timeout: SCREENSHOT_UPLOAD_TIMEOUT_MS,
-              maxBodyLength: Infinity,
-              maxContentLength: Infinity,
-            });
-            fileUrl = uploadUrl.split('?')[0];
-          }
-        } catch (_) {}
+        const putRes = await axios.put(uploadUrl, img, {
+          headers: { 'Content-Type': 'image/png' },
+          timeout: SCREENSHOT_UPLOAD_TIMEOUT_MS,
+          maxBodyLength: Infinity,
+          maxContentLength: Infinity,
+          validateStatus: () => true,
+        });
+        if (putRes.status < 200 || putRes.status >= 300) {
+          throw new Error(`Screenshot S3 PUT failed with HTTP ${putRes.status}`);
+        }
+        const fileUrl = String(uploadUrl).split('?')[0];
 
+        // Only record metadata after a successful object PUT (no orphan DB rows).
         await axios.post(`${API_BASE}/monitoring/screenshot`, {
           session_id: sessionId,
           file_key: fileKey,
-          file_url: fileUrl || 'data:image/png;base64,',
+          file_url: fileUrl,
           upload_token: sessionUploadToken,
         }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
 
