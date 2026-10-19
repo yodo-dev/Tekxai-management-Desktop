@@ -1727,6 +1727,29 @@ async function forceClockOutForMonitoringFailure(reason) {
   mainWindow?.webContents.send('session-expired');
 }
 
+async function ensureMonitoringSession(token) {
+  const axios = require('axios');
+  const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
+    agent_version: app.getVersion(),
+    os_platform: process.platform,
+  }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
+  sessionId = sessRes.data?.payload?.id;
+  sessionUploadToken = sessRes.data?.payload?.upload_token || null;
+  if (!sessionId || !sessionUploadToken) {
+    throw new Error('Monitoring session recovery missing id or upload_token');
+  }
+}
+
+function isUploadTokenFailure(err) {
+  const status = err?.response?.status;
+  const code = err?.response?.data?.code;
+  const msg = String(err?.response?.data?.message || err?.message || '');
+  return status === 403 && (
+    code === 'UPLOAD_TOKEN_INVALID'
+    || /upload_token/i.test(msg)
+  );
+}
+
 async function takeScreenshot(token) {
   await runExclusive(
     screenshotInFlight,
@@ -1736,16 +1759,7 @@ async function takeScreenshot(token) {
       let img = null;
       try {
         if (!sessionId || !sessionUploadToken) {
-          const axios = require('axios');
-          const sessRes = await axios.post(`${API_BASE}/monitoring/session/start`, {
-            agent_version: app.getVersion(),
-            os_platform: process.platform,
-          }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
-          sessionId = sessRes.data?.payload?.id;
-          sessionUploadToken = sessRes.data?.payload?.upload_token || null;
-          if (!sessionId || !sessionUploadToken) {
-            throw new Error('Monitoring session recovery missing id or upload_token');
-          }
+          await ensureMonitoringSession(token);
         }
 
         const axios = require('axios');
@@ -1781,13 +1795,27 @@ async function takeScreenshot(token) {
         }
         const fileUrl = String(uploadUrl).split('?')[0];
 
-        // Only record metadata after a successful object PUT (no orphan DB rows).
-        await axios.post(`${API_BASE}/monitoring/screenshot`, {
-          session_id: sessionId,
+        const postMetadata = (sid, uploadTok) => axios.post(`${API_BASE}/monitoring/screenshot`, {
+          session_id: sid,
           file_key: fileKey,
           file_url: fileUrl,
-          upload_token: sessionUploadToken,
+          upload_token: uploadTok,
         }, { headers: { Authorization: `Bearer ${token}` }, timeout: SCREENSHOT_API_TIMEOUT_MS });
+
+        // Only record metadata after a successful object PUT (no orphan DB rows).
+        try {
+          await postMetadata(sessionId, sessionUploadToken);
+        } catch (metaErr) {
+          // Expired/stale in-memory token after long shifts or JWT secret
+          // rotation — mint a fresh session and retry metadata once (object
+          // already in S3; do not re-PUT).
+          if (!isUploadTokenFailure(metaErr)) throw metaErr;
+          console.warn('[screenshot] upload_token rejected — refreshing monitoring session');
+          sessionId = null;
+          sessionUploadToken = null;
+          await ensureMonitoringSession(token);
+          await postMetadata(sessionId, sessionUploadToken);
+        }
 
         consecutiveScreenshotFailures = 0;
         mainWindow?.webContents.send('screenshot-taken');
