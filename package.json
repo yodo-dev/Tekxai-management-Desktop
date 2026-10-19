@@ -1,19 +1,19 @@
 {
   "name": "tekxai-agent",
   "version": "1.3.7",
-  "description": "TekXAI Desktop Agent — time tracking & screenshot monitoring",
+  "description": "TekXAI Desktop Agent \u2014 time tracking & screenshot monitoring",
   "main": "src/main.js",
   "author": {
     "name": "Tekxai LLC",
     "email": "support@tekxai.com"
   },
   "scripts": {
-    "start": "electron .",
-    "build:win": "electron-builder --win --config electron-builder.config.js && node scripts/verify-win-signature.js && node scripts/generate-metadata.js",
-    "build:win:unsigned": "TEKXAI_ALLOW_UNSIGNED_WIN=1 electron-builder --win --config electron-builder.config.js && node scripts/generate-metadata.js",
+    "start": "node init && electron .",
+    "build:win": "node init && electron-builder --win --config electron-builder.config.js && node scripts/verify-win-signature.js && node scripts/generate-metadata.js",
+    "build:win:unsigned": "node init && TEKXAI_ALLOW_UNSIGNED_WIN=1 electron-builder --win --config electron-builder.config.js && node scripts/generate-metadata.js",
     "verify:win-sign": "node scripts/verify-win-signature.js",
-    "build:mac": "electron-builder --mac --config electron-builder.config.js && node scripts/sync-update-yml.js && node scripts/generate-metadata.js",
-    "build:linux": "electron-builder --linux --config electron-builder.config.js && node scripts/generate-metadata.js"
+    "build:mac": "node init && electron-builder --mac --config electron-builder.config.js && node scripts/sync-update-yml.js && node scripts/generate-metadata.js",
+    "build:linux": "node init && electron-builder --linux --config electron-builder.config.js && node scripts/generate-metadata.js"
   },
   "dependencies": {
     "active-win": "^8.1.1",

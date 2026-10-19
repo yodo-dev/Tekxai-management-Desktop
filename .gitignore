@@ -3,8 +3,6 @@ dist/
 out/
 *.log
 .DS_Store
-.env
-.env.*
 !.env.*.example
 
 # code-signing material — must never be committed
@@ -15,3 +13,4 @@ out/
 *.crt
 *password*.txt
 signing/
+config.bat
